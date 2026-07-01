@@ -27,6 +27,7 @@ GitLab profiles (e.g. work and personal).`,
 	root.AddCommand(newVersionCommand())
 	root.AddCommand(newConfigCommand())
 	root.AddCommand(newAuthCommand())
+	root.AddCommand(newProfileCommand())
 
 	return root
 }

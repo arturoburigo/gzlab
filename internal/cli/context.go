@@ -57,3 +57,16 @@ func newClientForProfile(p config.Profile) (gitlab.Client, error) {
 func withAPITimeout(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(ctx, apiTimeout)
 }
+
+// removeProfile deletes a profile from the config file at path, clearing
+// default_profile if it pointed at the removed profile.
+func removeProfile(path string, cfg *config.Config, name string) error {
+	if _, ok := cfg.Profiles[name]; !ok {
+		return fmt.Errorf("profile %q not found", name)
+	}
+	delete(cfg.Profiles, name)
+	if cfg.DefaultProfile == name {
+		cfg.DefaultProfile = ""
+	}
+	return config.Save(path, cfg)
+}

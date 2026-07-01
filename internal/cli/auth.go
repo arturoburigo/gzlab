@@ -166,15 +166,8 @@ func newAuthLogoutCommand() *cobra.Command {
 			if name == "" {
 				return fmt.Errorf("no profile specified: pass a name, --profile, or configure a default_profile")
 			}
-			if _, ok := cfg.Profiles[name]; !ok {
-				return fmt.Errorf("profile %q not found", name)
-			}
 
-			delete(cfg.Profiles, name)
-			if cfg.DefaultProfile == name {
-				cfg.DefaultProfile = ""
-			}
-			if err := config.Save(path, cfg); err != nil {
+			if err := removeProfile(path, cfg, name); err != nil {
 				return err
 			}
 

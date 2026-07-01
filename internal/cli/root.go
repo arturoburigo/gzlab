@@ -25,6 +25,7 @@ GitLab profiles (e.g. work and personal).`,
 
 	root.PersistentFlags().StringVar(&profileFlag, "profile", "", "profile to use (overrides default_profile in config)")
 	root.AddCommand(newVersionCommand())
+	root.AddCommand(newConfigCommand())
 
 	return root
 }

@@ -43,8 +43,15 @@ func Save(path string, cfg *Config) error {
 		return fmt.Errorf("refusing to save invalid config: %w", err)
 	}
 
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("creating config directory: %w", err)
+	}
+	// MkdirAll only applies the mode to directories it creates, so a
+	// pre-existing directory with looser permissions (e.g. from a dotfiles
+	// sync) wouldn't otherwise be tightened.
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return fmt.Errorf("securing config directory: %w", err)
 	}
 
 	data, err := yaml.Marshal(cfg)
@@ -54,6 +61,12 @@ func Save(path string, cfg *Config) error {
 
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		return fmt.Errorf("writing config to %s: %w", path, err)
+	}
+	// Same reasoning as above: WriteFile only applies the mode when creating
+	// the file, not when overwriting an existing one with looser permissions.
+	// The config may contain a fallback token, so this isn't optional.
+	if err := os.Chmod(path, 0o600); err != nil {
+		return fmt.Errorf("securing config file: %w", err)
 	}
 	return nil
 }

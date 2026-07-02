@@ -197,6 +197,58 @@ func TestView_Dashboard(t *testing.T) {
 	}
 }
 
+func TestView_List(t *testing.T) {
+	m := loadedModel(t, &mockClient{})
+	m.screen = screenList
+	m.mrs = []*gitlab.MergeRequest{
+		{IID: 1, Title: "First MR", State: gitlab.MergeRequestStateOpened},
+		{IID: 2, Title: "Second MR, in draft", State: gitlab.MergeRequestStateOpened, Draft: true},
+	}
+	m.cursor = 1
+
+	view := m.View()
+	for _, want := range []string{"!1", "First MR", "!2", "Second MR, in draft", "(draft)", "> "} {
+		if !strings.Contains(view, want) {
+			t.Errorf("View() (list) missing %q\n%s", want, view)
+		}
+	}
+}
+
+func TestView_List_Empty(t *testing.T) {
+	m := loadedModel(t, &mockClient{})
+	m.screen = screenList
+	m.mrs = nil
+
+	if view := m.View(); !strings.Contains(view, "No open merge requests") {
+		t.Errorf("View() (empty list) = %q, want the empty-state message", view)
+	}
+}
+
+func TestView_Detail(t *testing.T) {
+	m := loadedModel(t, &mockClient{})
+	m.screen = screenDetail
+	m.detail = &gitlab.MergeRequest{
+		IID: 251, Title: "Alinha ao commons",
+		SourceBranch: "bugfix-PD-26527", TargetBranch: "master",
+		Author: "arturo.burigo", State: gitlab.MergeRequestStateOpened,
+		HasConflicts:      true,
+		ApprovalsRequired: 2, ApprovalsGiven: 1,
+		Pipeline: &gitlab.Pipeline{Status: gitlab.PipelineStatusRunning},
+	}
+
+	view := m.View()
+	for _, want := range []string{
+		"!251", "Alinha ao commons",
+		"bugfix-PD-26527", "master",
+		"arturo.burigo", "opened",
+		"running", "1/2", "Has conflicts",
+	} {
+		if !strings.Contains(view, want) {
+			t.Errorf("View() (detail) missing %q\n%s", want, view)
+		}
+	}
+}
+
 func TestView_Loading(t *testing.T) {
 	m := New(Deps{})
 	if !strings.Contains(m.View(), "Loading") {

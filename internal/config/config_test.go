@@ -1,7 +1,9 @@
 package config
 
 import (
+	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -34,6 +36,47 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	}
 	if p.Host != "https://gitlab.services.betha.cloud" {
 		t.Errorf("Host = %q, want %q", p.Host, "https://gitlab.services.betha.cloud")
+	}
+}
+
+func TestSave_TightensPreExistingLoosePermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX file permissions don't apply on windows")
+	}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+
+	// Simulate a config file/dir that already existed with looser
+	// permissions (e.g. restored from a dotfiles sync) before gitlab-tui
+	// ever wrote to it.
+	if err := os.WriteFile(path, []byte("default_profile: \"\"\nprofiles: {}\n"), 0o644); err != nil {
+		t.Fatalf("seeding pre-existing file: %v", err)
+	}
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatalf("seeding pre-existing dir perms: %v", err)
+	}
+
+	cfg := Default()
+	cfg.Profiles["empresa"] = Profile{Host: "https://gitlab.example.com", Token: "glpat-secret"}
+	if err := Save(path, cfg); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	fileInfo, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat(file) error = %v", err)
+	}
+	if got := fileInfo.Mode().Perm(); got != 0o600 {
+		t.Errorf("file permissions = %o, want 0600 (config may contain a token)", got)
+	}
+
+	dirInfo, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("Stat(dir) error = %v", err)
+	}
+	if got := dirInfo.Mode().Perm(); got != 0o700 {
+		t.Errorf("dir permissions = %o, want 0700", got)
 	}
 }
 
@@ -85,6 +128,22 @@ func TestValidate(t *testing.T) {
 				Diff:     DiffConfig{Mode: "sideways"},
 			},
 			wantErr: true,
+		},
+		{
+			name: "two profiles with the same host is ambiguous",
+			cfg: &Config{Profiles: map[string]Profile{
+				"work_a": {Host: "https://gitlab.example.com", TokenEnv: "X"},
+				"work_b": {Host: "https://gitlab.example.com/", TokenEnv: "Y"}, // trailing slash, still the same host
+			}},
+			wantErr: true,
+		},
+		{
+			name: "same hostname on different profiles is fine",
+			cfg: &Config{Profiles: map[string]Profile{
+				"empresa": {Host: "https://gitlab.services.betha.cloud", TokenEnv: "X"},
+				"pessoal": {Host: "https://gitlab.com", TokenEnv: "Y"},
+			}},
+			wantErr: false,
 		},
 	}
 

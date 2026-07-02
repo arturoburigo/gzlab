@@ -51,8 +51,20 @@ func ParseRemoteURL(remote string) (*RemoteInfo, error) {
 		return nil, fmt.Errorf("could not determine project path from remote URL %q", remote)
 	}
 
+	// http(s):// remotes use the same port for git and the API, so keep it
+	// (u.Host, not u.Hostname()) along with the original scheme. ssh://,
+	// git:// and scp-like remotes carry an SSH-specific port that has no
+	// relation to the API's port, so those fall back to a plain https host.
+	scheme := u.Scheme
+	host := u.Hostname()
+	if scheme == "http" || scheme == "https" {
+		host = u.Host
+	} else {
+		scheme = "https"
+	}
+
 	return &RemoteInfo{
-		Host: "https://" + u.Hostname(),
+		Host: scheme + "://" + host,
 		Path: path,
 	}, nil
 }

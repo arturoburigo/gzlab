@@ -1,9 +1,14 @@
 package config
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/arturoburigo/gitlab-tui/internal/gitdetect"
+)
 
 // Validate checks the config for internally-consistent, actionable errors.
 func (c *Config) Validate() error {
+	hostToProfile := make(map[string]string, len(c.Profiles))
 	for name, p := range c.Profiles {
 		if p.Host == "" {
 			return fmt.Errorf("profile %q is missing a host", name)
@@ -11,6 +16,12 @@ func (c *Config) Validate() error {
 		if p.TokenEnv == "" && p.Token == "" {
 			return fmt.Errorf("profile %q needs either token_env (recommended) or token", name)
 		}
+
+		normalized := gitdetect.NormalizeHost(p.Host)
+		if other, ok := hostToProfile[normalized]; ok {
+			return fmt.Errorf("profiles %q and %q both point at host %q; matching by host would be ambiguous", other, name, p.Host)
+		}
+		hostToProfile[normalized] = name
 	}
 
 	if c.DefaultProfile != "" {

@@ -40,25 +40,38 @@ func (c *realClient) GetProjectByPath(ctx context.Context, path string) (*Projec
 	return toProject(p), nil
 }
 
+// maxMergeRequestPages bounds ListMergeRequests' pagination loop. GitLab
+// caps PerPage at 100, so this allows up to 10,000 merge requests per
+// project — a defensive ceiling, not a real-world limit.
+const maxMergeRequestPages = 100
+
 func (c *realClient) ListMergeRequests(ctx context.Context, projectID int, opts ListMergeRequestsOptions) ([]*MergeRequest, error) {
 	state := string(opts.State)
 	if state == "" {
 		state = string(MergeRequestStateOpened)
 	}
 
-	listOpts := &gl.ListProjectMergeRequestsOptions{State: &state}
+	listOpts := &gl.ListProjectMergeRequestsOptions{
+		State:       &state,
+		ListOptions: gl.ListOptions{PerPage: 100, Page: 1},
+	}
 	if opts.SourceBranch != "" {
 		listOpts.SourceBranch = &opts.SourceBranch
 	}
 
-	mrs, _, err := c.api.MergeRequests.ListProjectMergeRequests(projectID, listOpts, gl.WithContext(ctx))
-	if err != nil {
-		return nil, fmt.Errorf("listing merge requests for project %d: %w", projectID, err)
-	}
-
-	result := make([]*MergeRequest, 0, len(mrs))
-	for _, mr := range mrs {
-		result = append(result, toMergeRequestFromBasic(mr))
+	var result []*MergeRequest
+	for page := 1; page <= maxMergeRequestPages; page++ {
+		listOpts.Page = int64(page)
+		mrs, resp, err := c.api.MergeRequests.ListProjectMergeRequests(projectID, listOpts, gl.WithContext(ctx))
+		if err != nil {
+			return nil, fmt.Errorf("listing merge requests for project %d: %w", projectID, err)
+		}
+		for _, mr := range mrs {
+			result = append(result, toMergeRequestFromBasic(mr))
+		}
+		if resp == nil || resp.NextPage == 0 {
+			break
+		}
 	}
 	return result, nil
 }

@@ -58,7 +58,7 @@ func newConfigShowCommand() *cobra.Command {
 func newConfigEditCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:   "edit",
-		Short: "Open the config file in $EDITOR",
+		Short: "Open the config file in ui.editor (config.yaml), $EDITOR, or vi",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			path, err := config.DefaultPath()
 			if err != nil {
@@ -69,15 +69,30 @@ func newConfigEditCommand() *cobra.Command {
 					return fmt.Errorf("creating default config: %w", err)
 				}
 			}
-
-			editor := os.Getenv("EDITOR")
-			if editor == "" {
-				editor = "vi"
+			cfg, err := config.Load(path)
+			if err != nil {
+				return err
 			}
-			parts := strings.Fields(editor)
+
+			parts := resolveEditorCommand(cfg)
 			c := exec.Command(parts[0], append(parts[1:], path)...)
 			c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
 			return c.Run()
 		},
 	}
+}
+
+// resolveEditorCommand picks the editor to launch: config.yaml's ui.editor,
+// then $EDITOR, then vi. A candidate that's empty or whitespace-only (e.g.
+// EDITOR="  ") is skipped rather than producing an empty argv[0].
+func resolveEditorCommand(cfg *config.Config) []string {
+	for _, candidate := range []string{cfg.UI.Editor, os.Getenv("EDITOR")} {
+		if parts := strings.Fields(candidate); len(parts) > 0 {
+			// exec.Command does no shell expansion, so a "~/bin/foo"-style
+			// editor path needs it done here.
+			parts[0] = config.ExpandHome(parts[0])
+			return parts
+		}
+	}
+	return []string{"vi"}
 }

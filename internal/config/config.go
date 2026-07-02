@@ -54,9 +54,12 @@ func Default() *Config {
 	return &Config{
 		Profiles: map[string]Profile{},
 		UI: UIConfig{
-			Theme:   "dark",
-			Mouse:   true,
-			Editor:  "$EDITOR",
+			Theme: "dark",
+			Mouse: true,
+			// Empty means "use $EDITOR, falling back to vi" — see
+			// internal/cli.resolveEditorCommand. Set this to override,
+			// e.g. "code --wait".
+			Editor:  "",
 			Browser: "default",
 		},
 		Diff: DiffConfig{

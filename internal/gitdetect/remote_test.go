@@ -29,9 +29,21 @@ func TestParseRemoteURL(t *testing.T) {
 			wantPath: "arturoburigo/gitlab-tui",
 		},
 		{
-			name:     "ssh:// with explicit port",
+			name:     "ssh:// with explicit port is dropped (SSH port, not the API port)",
 			remote:   "ssh://git@gitlab.example.com:2222/team/service.git",
 			wantHost: "https://gitlab.example.com",
+			wantPath: "team/service",
+		},
+		{
+			name:     "https:// with explicit port is preserved (same port as the API)",
+			remote:   "https://gitlab.example.com:8443/group/project.git",
+			wantHost: "https://gitlab.example.com:8443",
+			wantPath: "group/project",
+		},
+		{
+			name:     "http:// scheme is preserved, not forced to https",
+			remote:   "http://gitlab.internal/team/service.git",
+			wantHost: "http://gitlab.internal",
 			wantPath: "team/service",
 		},
 		{

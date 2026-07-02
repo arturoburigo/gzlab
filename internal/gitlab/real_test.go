@@ -98,6 +98,32 @@ func TestRealClient_ListMergeRequests_DefaultsToOpenedState(t *testing.T) {
 	}
 }
 
+func TestRealClient_ListMergeRequests_FollowsPagination(t *testing.T) {
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Query().Get("page") {
+		case "", "1":
+			w.Header().Set("X-Next-Page", "2")
+			writeJSON(t, w, http.StatusOK, []map[string]any{{"iid": 1, "title": "first page"}})
+		case "2":
+			// No X-Next-Page header: this is the last page.
+			writeJSON(t, w, http.StatusOK, []map[string]any{{"iid": 2, "title": "second page"}})
+		default:
+			t.Fatalf("unexpected page %q; pagination should have stopped after page 2", r.URL.Query().Get("page"))
+		}
+	})
+
+	got, err := client.ListMergeRequests(context.Background(), 2087, ListMergeRequestsOptions{})
+	if err != nil {
+		t.Fatalf("ListMergeRequests() error = %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("ListMergeRequests() returned %d MRs, want 2 (one from each page)", len(got))
+	}
+	if got[0].IID != 1 || got[1].IID != 2 {
+		t.Errorf("ListMergeRequests() = %+v, want IIDs [1, 2] in page order", got)
+	}
+}
+
 func TestRealClient_ListMergeRequests_FiltersBySourceBranch(t *testing.T) {
 	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		if got := r.URL.Query().Get("source_branch"); got != "bugfix-PD-26527" {

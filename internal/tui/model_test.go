@@ -1734,6 +1734,66 @@ func TestHelpOverlay_DoesNotInterceptCommentInput(t *testing.T) {
 	}
 }
 
+func TestParseGLabCommits(t *testing.T) {
+	raw := []map[string]any{
+		{"short_id": "abc1234", "title": "Fix the bug", "author_name": "Arturo", "created_at": "2026-07-01T10:00:00Z"},
+		{"short_id": "def5678", "title": "Add a test", "author_name": "Arturo"},
+	}
+	commits := parseGLabCommits(raw)
+	if len(commits) != 2 {
+		t.Fatalf("len = %d, want 2", len(commits))
+	}
+	if commits[0].ShortID != "abc1234" || commits[0].Title != "Fix the bug" || commits[0].AuthorName != "Arturo" {
+		t.Errorf("commit[0] = %+v", commits[0])
+	}
+	if commits[0].CreatedAt.IsZero() {
+		t.Error("expected created_at to parse")
+	}
+}
+
+func TestHandleKey_CommitsViewer(t *testing.T) {
+	client := &mockClient{detail: &gitlab.MergeRequest{IID: 251, Title: "x"}}
+	m := loadedModel(t, client)
+	m.screen = screenDetail
+	m.detail = client.detail
+	m.height = 20
+	m.width = 100
+	m.deps.RunGLab = func(ctx context.Context, dir string, args ...string) ([]byte, error) {
+		wantArgs := []string{"api", "projects/:id/merge_requests/251/commits?per_page=100"}
+		if !reflect.DeepEqual(args, wantArgs) {
+			t.Errorf("glab args = %#v, want %#v", args, wantArgs)
+		}
+		return []byte(`[{"short_id":"abc1234","title":"Fix the bug","author_name":"Arturo","created_at":"2026-07-01T10:00:00Z"}]`), nil
+	}
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("C")})
+	m = updated.(Model)
+	if cmd == nil {
+		t.Fatal("expected loadCommitsCmd")
+	}
+	loaded, ok := cmd().(commitsLoadedMsg)
+	if !ok {
+		t.Fatalf("expected commitsLoadedMsg, got %T", cmd())
+	}
+	updated, _ = m.Update(loaded)
+	m = updated.(Model)
+	if m.screen != screenCommits {
+		t.Errorf("screen = %v, want screenCommits", m.screen)
+	}
+	view := m.View()
+	for _, want := range []string{"Commits", "abc1234", "Fix the bug"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("View() (commits) missing %q\n%s", want, view)
+		}
+	}
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = updated.(Model)
+	if m.screen != screenDetail {
+		t.Errorf("screen after esc = %v, want screenDetail", m.screen)
+	}
+}
+
 func TestView_Loading(t *testing.T) {
 	m := New(Deps{})
 	if !strings.Contains(m.View(), "Loading") {

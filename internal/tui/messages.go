@@ -35,6 +35,8 @@ type mrActionDoneMsg struct{ status string }
 
 type mrCheckedOutMsg struct{ branch string }
 
+type commitsLoadedMsg struct{ commits []gitlab.Commit }
+
 type discussionsLoadedMsg struct{ discussions []gitlab.Discussion }
 
 type commentPostedMsg struct{ iid int }

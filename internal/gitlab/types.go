@@ -101,6 +101,14 @@ type MergeRequestDiff struct {
 	TooLarge      bool
 }
 
+// Commit is one commit in a merge request.
+type Commit struct {
+	ShortID    string
+	Title      string
+	AuthorName string
+	CreatedAt  time.Time
+}
+
 // Note is a single comment within a merge request discussion thread. System
 // notes (System == true) are GitLab's own activity log entries — "changed the
 // description", "added 3 commits", "marked as ready" — not human comments.

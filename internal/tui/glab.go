@@ -78,6 +78,32 @@ func loadDiscussionsFromGLab(ctx context.Context, deps Deps, iid int) ([]gitlab.
 	return parseGLabDiscussions(raw), nil
 }
 
+func loadCommitsFromGLab(ctx context.Context, deps Deps, iid int) ([]gitlab.Commit, error) {
+	out, err := deps.glab(ctx, "api", fmt.Sprintf("projects/:id/merge_requests/%d/commits?per_page=100", iid))
+	if err != nil {
+		return nil, err
+	}
+
+	var raw []map[string]any
+	if err := json.Unmarshal(out, &raw); err != nil {
+		return nil, fmt.Errorf("parsing commits JSON: %w", err)
+	}
+	return parseGLabCommits(raw), nil
+}
+
+func parseGLabCommits(raw []map[string]any) []gitlab.Commit {
+	commits := make([]gitlab.Commit, 0, len(raw))
+	for _, item := range raw {
+		commits = append(commits, gitlab.Commit{
+			ShortID:    stringValue(firstPresent(item, "short_id", "shortId")),
+			Title:      stringValue(item["title"]),
+			AuthorName: stringValue(firstPresent(item, "author_name", "authorName")),
+			CreatedAt:  timeValueFromAny(firstPresent(item, "created_at", "createdAt")),
+		})
+	}
+	return commits
+}
+
 func parseGLabDiscussions(raw []map[string]any) []gitlab.Discussion {
 	discussions := make([]gitlab.Discussion, 0, len(raw))
 	for _, item := range raw {

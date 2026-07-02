@@ -253,6 +253,16 @@ func checkoutMRCmd(deps Deps, iid int) tea.Cmd {
 	}
 }
 
+func loadCommitsCmd(deps Deps, iid int) tea.Cmd {
+	return func() tea.Msg {
+		commits, err := loadCommitsFromGLab(context.Background(), deps, iid)
+		if err != nil {
+			return errMsg{err}
+		}
+		return commitsLoadedMsg{commits: commits}
+	}
+}
+
 func loadDiscussionsCmd(deps Deps, iid int) tea.Cmd {
 	return func() tea.Msg {
 		discussions, err := loadDiscussionsFromGLab(context.Background(), deps, iid)

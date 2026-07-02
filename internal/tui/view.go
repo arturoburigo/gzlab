@@ -38,6 +38,8 @@ func (m Model) screenBody() string {
 		return m.renderJobLog()
 	case screenDiscussions:
 		return m.renderDiscussions()
+	case screenCommits:
+		return m.renderCommits()
 	default:
 		return m.renderDashboard()
 	}
@@ -57,6 +59,8 @@ func (m Model) screenHints() []hint {
 		return m.jobLogHints()
 	case screenDiscussions:
 		return m.discussHints()
+	case screenCommits:
+		return m.commitsHints()
 	default:
 		return m.dashboardHints()
 	}
@@ -204,6 +208,11 @@ func (m Model) screenTitle() string {
 			return fmt.Sprintf("Discussions !%d", m.detail.IID)
 		}
 		return "Discussions"
+	case screenCommits:
+		if m.detail != nil {
+			return fmt.Sprintf("Commits !%d", m.detail.IID)
+		}
+		return "Commits"
 	default:
 		return "Dashboard"
 	}

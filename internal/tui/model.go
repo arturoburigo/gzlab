@@ -27,6 +27,7 @@ const (
 	screenPipeline
 	screenJobLog
 	screenDiscussions
+	screenCommits
 )
 
 // Deps are the pre-resolved local-repo facts and constructors the TUI
@@ -84,6 +85,9 @@ type Model struct {
 	discuss       discussState
 	commentActive bool
 	commentInput  string
+
+	commits      []gitlab.Commit
+	commitOffset int
 
 	showHelp bool
 
@@ -191,6 +195,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.screen = screenDiscussions
 		return m, nil
 
+	case commitsLoadedMsg:
+		m.loading = false
+		m.commits = msg.commits
+		m.commitOffset = 0
+		m.screen = screenCommits
+		return m, nil
+
 	case commentPostedMsg:
 		m.status = "Comment posted."
 		m.loading = true
@@ -266,7 +277,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch m.screen {
 		case screenJobLog:
 			m.screen = screenPipeline
-		case screenDiff, screenPipeline, screenDiscussions:
+		case screenDiff, screenPipeline, screenDiscussions, screenCommits:
 			m.screen = screenDetail
 		case screenDetail:
 			m.screen = screenList
@@ -298,6 +309,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		if m.screen == screenDiscussions && m.detail != nil {
 			return m, loadDiscussionsCmd(m.deps, m.detail.IID)
+		}
+		if m.screen == screenCommits && m.detail != nil {
+			return m, loadCommitsCmd(m.deps, m.detail.IID)
 		}
 		return m, loadDashboardCmd(m.deps)
 
@@ -338,6 +352,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.scrollJobLog(-1)
 		case m.screen == screenDiscussions:
 			m.discuss.moveCursor(-1, m.discussBodyHeight())
+		case m.screen == screenCommits:
+			m.scrollCommits(-1)
 		case m.screen == screenDashboard && m.dashCursor > m.dashMinCursor():
 			m.dashCursor--
 		}
@@ -355,6 +371,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.scrollJobLog(1)
 		case m.screen == screenDiscussions:
 			m.discuss.moveCursor(1, m.discussBodyHeight())
+		case m.screen == screenCommits:
+			m.scrollCommits(1)
 		case m.screen == screenDashboard && m.dashCursor < m.dashMaxCursor():
 			m.dashCursor++
 		}
@@ -489,6 +507,13 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.status = "comment: "
 		}
 
+	case "C":
+		if m.screen == screenDetail && m.detail != nil {
+			m.loading = true
+			m.status = ""
+			return m, loadCommitsCmd(m.deps, m.detail.IID)
+		}
+
 	case "enter":
 		if m.screen == screenList && len(m.mrs) > 0 {
 			selected := m.mrs[m.cursor]
@@ -548,6 +573,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.discuss.cursor = 0
 			m.discuss.lineOffset = 0
 		}
+		if m.screen == screenCommits {
+			m.commitOffset = 0
+		}
 
 	case "G":
 		if m.screen == screenDiff {
@@ -565,6 +593,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.discuss.cursor = n - 1
 			}
 			m.discuss.scrollToEnd(m.discussBodyHeight())
+		}
+		if m.screen == screenCommits {
+			m.commitOffset = max(0, len(m.commits)-max(1, m.discussBodyHeight()))
 		}
 
 	case "R":
@@ -778,7 +809,7 @@ func (m Model) currentURL() string {
 		if m.jobLog.job != nil {
 			return m.jobLog.job.WebURL
 		}
-	case screenDiscussions:
+	case screenDiscussions, screenCommits:
 		if m.detail != nil {
 			return m.detail.WebURL
 		}

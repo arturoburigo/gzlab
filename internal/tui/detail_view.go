@@ -37,6 +37,6 @@ func (m Model) detailHints() []hint {
 	if m.detail.Draft {
 		draftLabel = "mark ready"
 	}
-	actions = append(actions, hint{"c", "comments"}, hint{"a", "approve"}, hint{"A", "revoke"}, hint{"w", draftLabel}, hint{"M", "merge"}, hint{"b", "checkout"})
+	actions = append(actions, hint{"c", "comments"}, hint{"C", "commits"}, hint{"a", "approve"}, hint{"A", "revoke"}, hint{"w", draftLabel}, hint{"M", "merge"}, hint{"b", "checkout"})
 	return append(actions, hint{"o", "open"}, hint{"y", "copy link"}, hint{"Y", "copy summary"}, hint{"esc", "back"}, hint{"q", "quit"})
 }

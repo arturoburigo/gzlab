@@ -85,6 +85,8 @@ type Model struct {
 	commentActive bool
 	commentInput  string
 
+	showHelp bool
+
 	confirmActive bool
 	confirmPrompt string
 	confirmCmd    tea.Cmd
@@ -242,10 +244,22 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.commentActive {
 		return m.handleCommentKey(msg)
 	}
+	if m.showHelp {
+		switch msg.String() {
+		case "q", "ctrl+c":
+			return m, tea.Quit
+		case "?", "esc":
+			m.showHelp = false
+		}
+		return m, nil
+	}
 
 	switch msg.String() {
 	case "q", "ctrl+c":
 		return m, tea.Quit
+
+	case "?":
+		m.showHelp = true
 
 	case "esc":
 		m.status = ""

@@ -18,32 +18,64 @@ func (m Model) View() string {
 		return m.frameView("Error", body, []hint{{"r", "retry"}, {"q", "quit"}})
 	}
 
-	var body string
-	var hints []hint
+	if m.showHelp {
+		return m.frameView("Help", m.renderHelp(), []hint{{"?/esc", "close"}, {"q", "quit"}})
+	}
+	return m.frameView(m.screenTitle(), m.screenBody(), m.screenHints())
+}
+
+func (m Model) screenBody() string {
 	switch m.screen {
 	case screenList:
-		body = m.renderList()
-		hints = m.listHints()
+		return m.renderList()
 	case screenDetail:
-		body = m.renderDetail()
-		hints = m.detailHints()
+		return m.renderDetail()
 	case screenDiff:
-		body = m.renderDiff()
-		hints = m.diffHints()
+		return m.renderDiff()
 	case screenPipeline:
-		body = m.renderPipeline()
-		hints = m.pipelineHints()
+		return m.renderPipeline()
 	case screenJobLog:
-		body = m.renderJobLog()
-		hints = m.jobLogHints()
+		return m.renderJobLog()
 	case screenDiscussions:
-		body = m.renderDiscussions()
-		hints = m.discussHints()
+		return m.renderDiscussions()
 	default:
-		body = m.renderDashboard()
-		hints = m.dashboardHints()
+		return m.renderDashboard()
 	}
-	return m.frameView(m.screenTitle(), body, hints)
+}
+
+func (m Model) screenHints() []hint {
+	switch m.screen {
+	case screenList:
+		return m.listHints()
+	case screenDetail:
+		return m.detailHints()
+	case screenDiff:
+		return m.diffHints()
+	case screenPipeline:
+		return m.pipelineHints()
+	case screenJobLog:
+		return m.jobLogHints()
+	case screenDiscussions:
+		return m.discussHints()
+	default:
+		return m.dashboardHints()
+	}
+}
+
+// renderHelp lists the current screen's keybindings vertically and untruncated
+// — the full set the footer can only show a width-limited slice of. It reuses
+// the same *Hints() the footer draws from, so the two never drift.
+func (m Model) renderHelp() string {
+	var b strings.Builder
+	b.WriteString(titleStyle.Render("Keybindings — "+m.screenTitle()) + "\n")
+	b.WriteString(ruleStyle.Render(strings.Repeat("─", 48)) + "\n\n")
+	for _, h := range m.screenHints() {
+		if h.desc == "" {
+			continue // skip count/position indicators like "1-5/10"
+		}
+		b.WriteString("  " + footerKey.Render(fmt.Sprintf("%-10s", h.key)) + footerStyle.Render(h.desc) + "\n")
+	}
+	return b.String()
 }
 
 func draftSuffix(mr *gitlab.MergeRequest) string {

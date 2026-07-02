@@ -85,7 +85,7 @@ func (m Model) dashboardHints() []hint {
 	if m.dash.MergeRequest != nil {
 		actions = append(actions, hint{"Y", "copy summary"})
 	}
-	return append(actions, hint{"r", "refresh"}, hint{"q", "quit"})
+	return append(actions, hint{"r", "refresh"}, hint{"?", "help"}, hint{"q", "quit"})
 }
 
 // recentBranchItems is the recent-branches list the dashboard shows: recorded

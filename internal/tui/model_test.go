@@ -1682,6 +1682,58 @@ func TestView_Dashboard_RecentCards(t *testing.T) {
 	}
 }
 
+func TestHandleKey_HelpOverlay(t *testing.T) {
+	m := loadedModel(t, &mockClient{})
+	m.screen = screenDetail
+	m.detail = &gitlab.MergeRequest{IID: 251, Title: "x"}
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("?")})
+	m = updated.(Model)
+	if !m.showHelp {
+		t.Fatal("expected ? to open the help overlay")
+	}
+	view := m.View()
+	if !strings.Contains(view, "Keybindings") {
+		t.Errorf("help view missing 'Keybindings'\n%s", view)
+	}
+	for _, want := range []string{"approve", "merge", "comments"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("help view missing the detail binding %q\n%s", want, view)
+		}
+	}
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("?")})
+	m = updated.(Model)
+	if m.showHelp {
+		t.Fatal("expected ? to toggle help closed")
+	}
+
+	m.showHelp = true
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = updated.(Model)
+	if m.showHelp {
+		t.Fatal("expected esc to close help")
+	}
+}
+
+func TestHelpOverlay_DoesNotInterceptCommentInput(t *testing.T) {
+	m := loadedModel(t, &mockClient{})
+	m.screen = screenDiscussions
+	m.detail = &gitlab.MergeRequest{IID: 251}
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("c")})
+	m = updated.(Model)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("?")})
+	m = updated.(Model)
+
+	if m.showHelp {
+		t.Fatal("? should not open help while composing a comment")
+	}
+	if m.commentInput != "?" {
+		t.Errorf("commentInput = %q, want ?", m.commentInput)
+	}
+}
+
 func TestView_Loading(t *testing.T) {
 	m := New(Deps{})
 	if !strings.Contains(m.View(), "Loading") {

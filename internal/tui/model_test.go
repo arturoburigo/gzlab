@@ -1559,12 +1559,24 @@ func TestUpdate_DashboardLoaded_RecordsHistoryWhenConfigured(t *testing.T) {
 		NewClient:   func(config.Profile) (gitlab.Client, error) { return &mockClient{}, nil },
 	})
 
-	_, cmd := m.Update(dashboardLoadedMsg{ctx: testDashContext()})
+	updated, cmd := m.Update(dashboardLoadedMsg{ctx: testDashContext()})
+	m = updated.(Model)
 	if cmd == nil {
 		t.Fatal("expected a record-history command when HistoryPath is set")
 	}
-	if msg := cmd(); msg != nil {
-		t.Errorf("recordHistoryCmd emitted %v, want no message", msg)
+	loaded, ok := cmd().(historyLoadedMsg)
+	if !ok {
+		t.Fatalf("expected historyLoadedMsg, got %T", cmd())
+	}
+	if len(loaded.branches) != 1 || loaded.branches[0].MRIID != 251 {
+		t.Errorf("recorded branches = %+v", loaded.branches)
+	}
+
+	// applying it lands the recents on the model for rendering
+	updated, _ = m.Update(loaded)
+	m = updated.(Model)
+	if len(m.recentBranches) != 1 {
+		t.Errorf("m.recentBranches = %+v, want one entry", m.recentBranches)
 	}
 
 	store, err := history.Load(path)
@@ -1572,7 +1584,7 @@ func TestUpdate_DashboardLoaded_RecordsHistoryWhenConfigured(t *testing.T) {
 		t.Fatalf("Load: %v", err)
 	}
 	if len(store.Branches("empresa")) != 1 {
-		t.Errorf("expected one recorded branch, got %+v", store.Branches("empresa"))
+		t.Errorf("expected one recorded branch on disk, got %+v", store.Branches("empresa"))
 	}
 }
 
@@ -1580,6 +1592,93 @@ func TestUpdate_DashboardLoaded_NoHistoryPathIsNoop(t *testing.T) {
 	m := New(Deps{NewClient: func(config.Profile) (gitlab.Client, error) { return &mockClient{}, nil }})
 	if _, cmd := m.Update(dashboardLoadedMsg{ctx: testDashContext()}); cmd != nil {
 		t.Fatalf("expected no history command without a HistoryPath, got %T", cmd())
+	}
+}
+
+func TestRecentItems_ExcludeCurrent(t *testing.T) {
+	m := loadedModel(t, &mockClient{})
+	m.recentBranches = []history.Branch{{Name: "bugfix-PD-26527"}, {Name: "feature-x"}}
+	m.recentProjects = []history.Project{
+		{Path: "atendimento/protocolo/cadastros/api-protocolo-cadastros"},
+		{Path: "team/other"},
+	}
+	if items := m.recentBranchItems(); len(items) != 1 || items[0].Name != "feature-x" {
+		t.Errorf("recentBranchItems = %+v, want just feature-x (current branch excluded)", items)
+	}
+	if items := m.recentProjectItems(); len(items) != 1 || items[0].Path != "team/other" {
+		t.Errorf("recentProjectItems = %+v, want just team/other (current project excluded)", items)
+	}
+}
+
+func TestDashboard_RecentBranchNavigateAndOpen(t *testing.T) {
+	client := &mockClient{detail: &gitlab.MergeRequest{IID: 99, Title: "Other MR"}}
+	m := loadedModel(t, client)
+	m.screen = screenDashboard
+	m.recentBranches = []history.Branch{
+		{Name: "bugfix-PD-26527", ProjectPath: "atendimento/protocolo/cadastros/api-protocolo-cadastros", MRIID: 251},
+		{Name: "feature-x", ProjectPath: "atendimento/protocolo/cadastros/api-protocolo-cadastros", MRIID: 99, MRTitle: "Other MR"},
+	}
+	m.dashCursor = m.dashMinCursor() // -1: current-branch MR selected
+
+	// j steps from the current MR into the recent list (feature-x; the current
+	// branch is excluded from the list)
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	m = updated.(Model)
+	if m.dashCursor != 0 {
+		t.Fatalf("dashCursor = %d, want 0 after j", m.dashCursor)
+	}
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	if cmd == nil {
+		t.Fatal("expected loadMRDetailCmd for the selected recent branch")
+	}
+	if _, ok := cmd().(mrDetailLoadedMsg); !ok {
+		t.Fatalf("expected mrDetailLoadedMsg, got %T", cmd())
+	}
+
+	// k steps back to the current-MR slot
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("k")})
+	m = updated.(Model)
+	if m.dashCursor != -1 {
+		t.Fatalf("dashCursor = %d, want -1 back at the current MR", m.dashCursor)
+	}
+}
+
+func TestDashboard_RecentBranchOtherProjectNotOpenable(t *testing.T) {
+	m := loadedModel(t, &mockClient{})
+	m.screen = screenDashboard
+	m.recentBranches = []history.Branch{
+		{Name: "feature-y", ProjectPath: "other/project", MRIID: 5, MRTitle: "elsewhere"},
+	}
+	m.dashCursor = 0
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("expected no command for a branch in another project, got %T", cmd())
+	}
+	if !strings.Contains(m.status, "no open MR") {
+		t.Fatalf("status = %q, want an explanation", m.status)
+	}
+}
+
+func TestView_Dashboard_RecentCards(t *testing.T) {
+	m := loadedModel(t, &mockClient{})
+	m.screen = screenDashboard
+	m.height = 40
+	m.width = 100
+	m.recentBranches = []history.Branch{
+		{Name: "feature-x", ProjectPath: "atendimento/protocolo/cadastros/api-protocolo-cadastros", MRIID: 99, MRTitle: "Other MR"},
+	}
+	m.recentProjects = []history.Project{{Path: "team/another-service"}}
+	m.dashCursor = m.dashMinCursor()
+
+	view := m.View()
+	for _, want := range []string{"Recent branches", "feature-x", "!99", "Recent projects", "another-service"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("View() (dashboard cards) missing %q\n%s", want, view)
+		}
 	}
 }
 

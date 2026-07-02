@@ -14,6 +14,7 @@ import (
 	"github.com/arturoburigo/gitlab-tui/internal/dashboard"
 	"github.com/arturoburigo/gitlab-tui/internal/gitdetect"
 	"github.com/arturoburigo/gitlab-tui/internal/gitlab"
+	"github.com/arturoburigo/gitlab-tui/internal/history"
 )
 
 type screen int
@@ -53,6 +54,10 @@ type Model struct {
 	status  string
 
 	dash *dashboard.Context
+
+	recentProjects []history.Project
+	recentBranches []history.Branch
+	dashCursor     int
 
 	mrs    []*gitlab.MergeRequest
 	cursor int
@@ -111,6 +116,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.client = client
 		return m, recordHistoryCmd(m.deps, msg.ctx)
+
+	case historyLoadedMsg:
+		m.recentProjects = msg.projects
+		m.recentBranches = msg.branches
+		m.dashCursor = m.dashMinCursor()
+		return m, nil
 
 	case mrListLoadedMsg:
 		m.loading = false
@@ -313,6 +324,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.scrollJobLog(-1)
 		case m.screen == screenDiscussions:
 			m.discuss.moveCursor(-1, m.discussBodyHeight())
+		case m.screen == screenDashboard && m.dashCursor > m.dashMinCursor():
+			m.dashCursor--
 		}
 
 	case "down", "j":
@@ -328,6 +341,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.scrollJobLog(1)
 		case m.screen == screenDiscussions:
 			m.discuss.moveCursor(1, m.discussBodyHeight())
+		case m.screen == screenDashboard && m.dashCursor < m.dashMaxCursor():
+			m.dashCursor++
 		}
 
 	case "left", "h":
@@ -466,9 +481,21 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.loading = true
 			return m, loadMRDetailCmd(m.client, m.dash.Project.ID, selected.IID)
 		}
-		if m.screen == screenDashboard && m.dash != nil && m.dash.MergeRequest != nil {
-			m.loading = true
-			return m, loadMRDetailCmd(m.client, m.dash.Project.ID, m.dash.MergeRequest.IID)
+		if m.screen == screenDashboard {
+			items := m.recentBranchItems()
+			if m.dashCursor >= 0 && m.dashCursor < len(items) {
+				sel := items[m.dashCursor]
+				if sel.MRIID != 0 && m.dash != nil && m.dash.Project != nil && sel.ProjectPath == m.dash.Project.PathWithNamespace {
+					m.loading = true
+					return m, loadMRDetailCmd(m.client, m.dash.Project.ID, sel.MRIID)
+				}
+				m.status = "That recent branch has no open MR in this project."
+				return m, nil
+			}
+			if m.dash != nil && m.dash.MergeRequest != nil {
+				m.loading = true
+				return m, loadMRDetailCmd(m.client, m.dash.Project.ID, m.dash.MergeRequest.IID)
+			}
 		}
 		if m.screen == screenPipeline && m.jobCursor >= 0 && m.jobCursor < len(m.jobs) {
 			m.loading = true

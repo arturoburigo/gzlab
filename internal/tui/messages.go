@@ -3,9 +3,15 @@ package tui
 import (
 	"github.com/arturoburigo/gitlab-tui/internal/dashboard"
 	"github.com/arturoburigo/gitlab-tui/internal/gitlab"
+	"github.com/arturoburigo/gitlab-tui/internal/history"
 )
 
 type dashboardLoadedMsg struct{ ctx *dashboard.Context }
+
+type historyLoadedMsg struct {
+	projects []history.Project
+	branches []history.Branch
+}
 
 type mrListLoadedMsg struct{ mrs []*gitlab.MergeRequest }
 

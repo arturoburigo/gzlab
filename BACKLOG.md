@@ -29,8 +29,8 @@ against `gitlab.services.betha.cloud`.
 
 Untouched this session, all tasks from the plan doc still apply as written:
 
-- 🚧 **8 — Projetos Recentes** — the persistence store landed: `internal/history` (single `~/.config/gitlab-tui/history.json`, keyed by profile, recency-ordered and bounded to 10, best-effort). Each dashboard load records the current project. **Deferred:** the dashboard "recent projects" card and selecting one to switch to.
-- 🚧 **9 — Branches Recentes** — same store records the current branch with its MR association (IID + title) on every dashboard load. **Deferred:** the dashboard "recent branches" card, selecting one, and Épico 18's "refresh recent branches after checkout" tail (the data's now captured; only the display/selection is missing).
+- 🚧 **8 — Projetos Recentes** — store (`internal/history`: single `~/.config/gitlab-tui/history.json`, keyed by profile, recency-ordered, bounded to 10, best-effort) records the current project on every dashboard load, and the dashboard shows a read-only "Recent projects" card (current project excluded). **Deferred:** selecting a recent project to switch to it — that's cross-repo navigation, which overlaps Épico 19's workspace.
+- 🚧 **9 — Branches Recentes** — the store records the current branch with its MR association (IID + title); the dashboard shows a navigable "Recent branches" card (current branch excluded). `j`/`k` move a cursor spanning the current-MR slot (`-1`) and the recent list; `enter` opens the selected branch's MR when it's in the current project. **Deferred:** opening a recent branch whose MR is in another project (needs cross-project resolution, Épico 19), and recording on checkout (today the card refreshes on the next dashboard load / `r`).
 - **10 — Busca Global** — backlog.
 
 ## Fase 2 — Valor real para review

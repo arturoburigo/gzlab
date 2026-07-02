@@ -37,15 +37,18 @@ func recordHistoryCmd(deps Deps, ctx *dashboard.Context) tea.Cmd {
 		return nil
 	}
 	return func() tea.Msg {
-		recordHistory(deps.HistoryPath, ctx)
-		return nil
+		store := recordHistory(deps.HistoryPath, ctx)
+		return historyLoadedMsg{
+			projects: store.Projects(ctx.ProfileName),
+			branches: store.Branches(ctx.ProfileName),
+		}
 	}
 }
 
-func recordHistory(path string, ctx *dashboard.Context) {
+func recordHistory(path string, ctx *dashboard.Context) *history.Store {
 	store, err := history.Load(path)
 	if err != nil {
-		return
+		return &history.Store{}
 	}
 
 	now := time.Now()
@@ -70,6 +73,7 @@ func recordHistory(path string, ctx *dashboard.Context) {
 	}
 
 	_ = history.Save(path, store)
+	return store
 }
 
 func loadMRListCmd(client gitlab.Client, projectID int) tea.Cmd {

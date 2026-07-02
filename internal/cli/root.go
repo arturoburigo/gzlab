@@ -21,6 +21,7 @@ workflow: merge requests, diffs, pipelines and job logs, across multiple
 GitLab profiles (e.g. work and personal).`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
+		RunE:          runTUI,
 	}
 
 	root.PersistentFlags().StringVar(&profileFlag, "profile", "", "profile to use (overrides default_profile in config)")

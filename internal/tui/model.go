@@ -294,6 +294,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, copyLinkCmd(url)
 		}
 
+	case "Y":
+		if mr := m.summaryMR(); mr != nil {
+			return m, copyToClipboardCmd(mrSummary(mr, m.projectPath()), "Summary copied to clipboard.")
+		}
+
 	case "up", "k":
 		switch {
 		case m.screen == screenList && m.cursor > 0:

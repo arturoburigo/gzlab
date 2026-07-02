@@ -1476,6 +1476,63 @@ func TestHandleKey_ResolveThread_PlainCommentNoop(t *testing.T) {
 	}
 }
 
+func TestMRSummary(t *testing.T) {
+	mr := &gitlab.MergeRequest{
+		IID: 251, Title: "Alinha ao commons",
+		SourceBranch: "bugfix-PD-26527", TargetBranch: "master",
+		Author: "arturo.burigo", State: gitlab.MergeRequestStateOpened,
+		ApprovalsRequired: 2, ApprovalsGiven: 1,
+		HasConflicts: true,
+		Pipeline:     &gitlab.Pipeline{Status: gitlab.PipelineStatusFailed},
+		WebURL:       "https://gitlab.services.betha.cloud/team/service/-/merge_requests/251",
+	}
+
+	got := mrSummary(mr, "namespace/project")
+	for _, want := range []string{
+		"!251 Alinha ao commons",
+		"namespace/project",
+		"bugfix-PD-26527 → master",
+		"arturo.burigo",
+		"opened",
+		"failed",
+		"1/2",
+		"Conflicts: yes",
+		"https://gitlab.services.betha.cloud/team/service/-/merge_requests/251",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("mrSummary missing %q\n---\n%s", want, got)
+		}
+	}
+}
+
+func TestMRSummary_OmitsEmptyFields(t *testing.T) {
+	mr := &gitlab.MergeRequest{IID: 7, Title: "Minimal", SourceBranch: "a", TargetBranch: "b"}
+	got := mrSummary(mr, "")
+	for _, absent := range []string{"Project:", "Author:", "Pipeline:", "Approvals:", "Conflicts:"} {
+		if strings.Contains(got, absent) {
+			t.Errorf("mrSummary should omit %q for an empty field\n%s", absent, got)
+		}
+	}
+}
+
+func TestHandleKey_CopySummary(t *testing.T) {
+	m := loadedModel(t, &mockClient{})
+	m.screen = screenDetail
+	m.detail = &gitlab.MergeRequest{IID: 251, Title: "x", SourceBranch: "a", TargetBranch: "b"}
+
+	if _, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("Y")}); cmd == nil {
+		t.Fatal("expected a copy-summary command when an MR is in context")
+	}
+
+	noMR := loadedModel(t, &mockClient{})
+	noMR.screen = screenList
+	noMR.detail = nil
+	noMR.dash.MergeRequest = nil
+	if _, cmd := noMR.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("Y")}); cmd != nil {
+		t.Fatalf("expected no command when no MR is in context, got %T", cmd())
+	}
+}
+
 func TestView_Loading(t *testing.T) {
 	m := New(Deps{})
 	if !strings.Contains(m.View(), "Loading") {

@@ -246,11 +246,15 @@ func openBrowserCmd(url string) tea.Cmd {
 	}
 }
 
-func copyLinkCmd(url string) tea.Cmd {
+func copyToClipboardCmd(text, success string) tea.Cmd {
 	return func() tea.Msg {
-		if err := clipboard.WriteAll(url); err != nil {
+		if err := clipboard.WriteAll(text); err != nil {
 			return errMsg{fmt.Errorf("copying to clipboard: %w", err)}
 		}
-		return statusMsg{"Link copied to clipboard."}
+		return statusMsg{success}
 	}
+}
+
+func copyLinkCmd(url string) tea.Cmd {
+	return copyToClipboardCmd(url, "Link copied to clipboard.")
 }

@@ -36,5 +36,8 @@ func (m Model) dashboardHints() []hint {
 	if m.currentURL() != "" {
 		actions = append(actions, hint{"o", "open"}, hint{"y", "copy link"})
 	}
+	if m.dash.MergeRequest != nil {
+		actions = append(actions, hint{"Y", "copy summary"})
+	}
 	return append(actions, hint{"r", "refresh"}, hint{"q", "quit"})
 }

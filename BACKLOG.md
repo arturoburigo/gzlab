@@ -52,7 +52,7 @@ Untouched this session, all tasks from the plan doc still apply as written:
 
 - **22 — UI Base** (multi-panel layout, themes, mouse) — current TUI is a single-panel screen sequence, not the three-area layout from §4 of the plan; revisit once there's enough screens to justify it.
 - **23 — Atalhos** — most of the plan's suggested table is bound now (global: `o`/`y`/`Y`/`r`/`m`/`q`/`esc`/`j`/`k`/`enter`; diff: `h`/`l`/`[`/`]`/`/`/`n`/`N`/`s`/`w`/`e`; pipeline: `R`/`P`/`t`/`x`; job log: `/`/`n`/`N`/`e`/`E`/`R`; MR detail: `c`/`a`/`A`/`w`/`M`/`b`/`x`; discussions: `c` (compose)/`t` (resolve)/`j`/`k`/`g`/`G`). Deliberately kept `r` = refresh everywhere instead of the plan's per-screen "r = retry job" suggestion, to stay consistent across screens — see BACKLOG notes on 14/15. The `?` help overlay is now bound — a contextual keybinding cheat-sheet that reuses each screen's `*Hints()` (so it never drifts from the footer) and shows the full, untruncated set. Still missing: `Tab`/`Shift+Tab` panel switching (no multi-panel layout yet — see 22). Comment shortcuts landed with Épico 16 (`c`).
-- **24 — CLI Complementar** (`mr list`, `mr view`, `mr checkout`, `pipeline list/logs` as standalone commands, not just inside the TUI).
+- 🚧 **24 — CLI Complementar** — `gitlab-tui mr list` (open MRs for the current project) and `gitlab-tui mr view [iid]` (MR detail as text; defaults to the current branch's MR) ship as standalone commands, reusing the same repo→profile→project resolution as the TUI (`resolveProject`) and the `Client` interface. **Deferred:** `mr checkout`, `pipeline list/logs` as standalone commands.
 - **26 — Distribuição** (cross-platform binaries, releases, install script).
 
 ## Explicitly future (per the plan, not re-scoped here)

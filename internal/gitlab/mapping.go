@@ -50,13 +50,75 @@ func toMergeRequestFromBasic(mr *gl.BasicMergeRequest) *MergeRequest {
 func toMergeRequest(mr *gl.MergeRequest) *MergeRequest {
 	result := toMergeRequestFromBasic(&mr.BasicMergeRequest)
 	if mr.Pipeline != nil {
-		result.Pipeline = &Pipeline{
-			ID:        int(mr.Pipeline.ID),
-			Status:    PipelineStatus(mr.Pipeline.Status),
-			Ref:       mr.Pipeline.Ref,
-			WebURL:    mr.Pipeline.WebURL,
-			CreatedAt: timeValue(mr.Pipeline.CreatedAt),
-		}
+		result.Pipeline = toPipelineInfo(mr.Pipeline)
 	}
 	return result
+}
+
+func toPipelineInfo(p *gl.PipelineInfo) *Pipeline {
+	if p == nil {
+		return nil
+	}
+	return &Pipeline{
+		ID:        int(p.ID),
+		IID:       int(p.IID),
+		Status:    PipelineStatus(p.Status),
+		Source:    p.Source,
+		Ref:       p.Ref,
+		SHA:       p.SHA,
+		WebURL:    p.WebURL,
+		CreatedAt: timeValue(p.CreatedAt),
+	}
+}
+
+func toPipeline(p *gl.Pipeline) *Pipeline {
+	if p == nil {
+		return nil
+	}
+	return &Pipeline{
+		ID:         int(p.ID),
+		IID:        int(p.IID),
+		Status:     PipelineStatus(p.Status),
+		Source:     string(p.Source),
+		Ref:        p.Ref,
+		SHA:        p.SHA,
+		WebURL:     p.WebURL,
+		CreatedAt:  timeValue(p.CreatedAt),
+		StartedAt:  timeValue(p.StartedAt),
+		FinishedAt: timeValue(p.FinishedAt),
+		Duration:   int(p.Duration),
+		Coverage:   p.Coverage,
+	}
+}
+
+func toMergeRequestDiff(d *gl.MergeRequestDiff) *MergeRequestDiff {
+	return &MergeRequestDiff{
+		OldPath:       d.OldPath,
+		NewPath:       d.NewPath,
+		Diff:          d.Diff,
+		NewFile:       d.NewFile,
+		RenamedFile:   d.RenamedFile,
+		DeletedFile:   d.DeletedFile,
+		GeneratedFile: d.GeneratedFile,
+		Collapsed:     d.Collapsed,
+		TooLarge:      d.TooLarge,
+	}
+}
+
+func toJob(j *gl.Job) *Job {
+	return &Job{
+		ID:             int(j.ID),
+		Name:           j.Name,
+		Stage:          j.Stage,
+		Status:         JobStatus(j.Status),
+		Ref:            j.Ref,
+		WebURL:         j.WebURL,
+		Duration:       j.Duration,
+		QueuedDuration: j.QueuedDuration,
+		AllowFailure:   j.AllowFailure,
+		FailureReason:  j.FailureReason,
+		CreatedAt:      timeValue(j.CreatedAt),
+		StartedAt:      timeValue(j.StartedAt),
+		FinishedAt:     timeValue(j.FinishedAt),
+	}
 }

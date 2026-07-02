@@ -36,6 +36,18 @@ func (m *mockClient) GetMergeRequest(ctx context.Context, projectID, iid int) (*
 	return m.mr, nil
 }
 
+func (m *mockClient) ListMergeRequestDiffs(ctx context.Context, projectID, iid int) ([]*gitlab.MergeRequestDiff, error) {
+	return nil, nil
+}
+
+func (m *mockClient) GetPipeline(ctx context.Context, projectID, pipelineID int) (*gitlab.Pipeline, error) {
+	return nil, nil
+}
+
+func (m *mockClient) ListPipelineJobs(ctx context.Context, projectID, pipelineID int) ([]*gitlab.Job, error) {
+	return nil, nil
+}
+
 func (m *mockClient) FindMergeRequestForBranch(ctx context.Context, projectID int, branch string) (*gitlab.MergeRequest, error) {
 	if m.findMRErr != nil {
 		return nil, m.findMRErr

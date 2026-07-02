@@ -46,6 +46,16 @@ func CurrentBranch(dir string) (string, error) {
 	return out, nil
 }
 
+// HasUncommittedChanges reports whether the working tree has staged, unstaged,
+// or untracked changes — the state a branch checkout could disrupt.
+func HasUncommittedChanges(dir string) (bool, error) {
+	out, err := runGit(dir, "status", "--porcelain")
+	if err != nil {
+		return false, err
+	}
+	return out != "", nil
+}
+
 func runGit(dir string, args ...string) (string, error) {
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir

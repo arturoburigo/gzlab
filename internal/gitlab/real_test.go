@@ -174,6 +174,117 @@ func TestRealClient_GetMergeRequest_NotFound(t *testing.T) {
 	}
 }
 
+func TestRealClient_ListMergeRequestDiffs_FollowsPagination(t *testing.T) {
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if !strings.Contains(r.URL.Path, "/merge_requests/251/diffs") {
+			t.Errorf("unexpected path %q", r.URL.Path)
+		}
+		switch r.URL.Query().Get("page") {
+		case "", "1":
+			w.Header().Set("X-Next-Page", "2")
+			writeJSON(t, w, http.StatusOK, []map[string]any{{
+				"old_path": "old.go", "new_path": "new.go", "diff": "@@ -1 +1 @@\n-old\n+new", "renamed_file": true,
+			}})
+		case "2":
+			writeJSON(t, w, http.StatusOK, []map[string]any{{
+				"old_path": "deleted.go", "new_path": "deleted.go", "deleted_file": true,
+			}})
+		default:
+			t.Fatalf("unexpected page %q", r.URL.Query().Get("page"))
+		}
+	})
+
+	got, err := client.ListMergeRequestDiffs(context.Background(), 2087, 251)
+	if err != nil {
+		t.Fatalf("ListMergeRequestDiffs() error = %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("ListMergeRequestDiffs() returned %d diffs, want 2", len(got))
+	}
+	if !got[0].RenamedFile || !got[1].DeletedFile {
+		t.Errorf("ListMergeRequestDiffs() = %+v", got)
+	}
+}
+
+func TestRealClient_ListMergeRequestDiffs_FallsBackToRawDiffsOnServerError(t *testing.T) {
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.URL.Path, "/merge_requests/8/diffs"):
+			writeJSON(t, w, http.StatusInternalServerError, map[string]any{"message": "500 Internal Server Error"})
+		case strings.Contains(r.URL.Path, "/merge_requests/8/raw_diffs"):
+			w.WriteHeader(http.StatusOK)
+			if _, err := w.Write([]byte("diff --git a/a.go b/a.go\n@@ -1 +1 @@\n-old\n+new\n")); err != nil {
+				t.Fatalf("writing raw diff: %v", err)
+			}
+		default:
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+	})
+
+	got, err := client.ListMergeRequestDiffs(context.Background(), 5822, 8)
+	if err != nil {
+		t.Fatalf("ListMergeRequestDiffs() error = %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("ListMergeRequestDiffs() returned %d diffs, want raw fallback as one diff", len(got))
+	}
+	if !strings.Contains(got[0].Diff, "diff --git a/a.go b/a.go") || !strings.Contains(got[0].Diff, "+new") {
+		t.Errorf("raw fallback diff = %q", got[0].Diff)
+	}
+}
+
+func TestRealClient_GetPipeline(t *testing.T) {
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if !strings.Contains(r.URL.Path, "/pipelines/3237626") {
+			t.Errorf("unexpected path %q", r.URL.Path)
+		}
+		writeJSON(t, w, http.StatusOK, map[string]any{
+			"id": 3237626, "iid": 77, "status": "failed", "source": "merge_request_event",
+			"ref": "refs/merge-requests/251/head", "sha": "abc123", "duration": 125, "coverage": "82.5",
+		})
+	})
+
+	got, err := client.GetPipeline(context.Background(), 2087, 3237626)
+	if err != nil {
+		t.Fatalf("GetPipeline() error = %v", err)
+	}
+	if got.ID != 3237626 || got.IID != 77 || got.Status != PipelineStatusFailed || got.Duration != 125 {
+		t.Errorf("GetPipeline() = %+v", got)
+	}
+}
+
+func TestRealClient_ListPipelineJobs_FollowsPagination(t *testing.T) {
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if !strings.Contains(r.URL.Path, "/pipelines/3237626/jobs") {
+			t.Errorf("unexpected path %q", r.URL.Path)
+		}
+		switch r.URL.Query().Get("page") {
+		case "", "1":
+			w.Header().Set("X-Next-Page", "2")
+			writeJSON(t, w, http.StatusOK, []map[string]any{{
+				"id": 10, "name": "test", "stage": "test", "status": "failed", "duration": 61.0, "failure_reason": "script_failure",
+			}})
+		case "2":
+			writeJSON(t, w, http.StatusOK, []map[string]any{{
+				"id": 11, "name": "build", "stage": "build", "status": "success", "allow_failure": true,
+			}})
+		default:
+			t.Fatalf("unexpected page %q", r.URL.Query().Get("page"))
+		}
+	})
+
+	got, err := client.ListPipelineJobs(context.Background(), 2087, 3237626)
+	if err != nil {
+		t.Fatalf("ListPipelineJobs() error = %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("ListPipelineJobs() returned %d jobs, want 2", len(got))
+	}
+	if got[0].Status != JobStatusFailed || got[0].FailureReason != "script_failure" || !got[1].AllowFailure {
+		t.Errorf("ListPipelineJobs() = %+v", got)
+	}
+}
+
 func TestRealClient_FindMergeRequestForBranch_Found(t *testing.T) {
 	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		switch {

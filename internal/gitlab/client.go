@@ -38,6 +38,15 @@ type Client interface {
 	// single merge request.
 	GetMergeRequest(ctx context.Context, projectID, iid int) (*MergeRequest, error)
 
+	// ListMergeRequestDiffs lists changed files for a merge request.
+	ListMergeRequestDiffs(ctx context.Context, projectID, iid int) ([]*MergeRequestDiff, error)
+
+	// GetPipeline fetches full detail for a pipeline.
+	GetPipeline(ctx context.Context, projectID, pipelineID int) (*Pipeline, error)
+
+	// ListPipelineJobs lists jobs for a pipeline.
+	ListPipelineJobs(ctx context.Context, projectID, pipelineID int) ([]*Job, error)
+
 	// FindMergeRequestForBranch returns the open merge request whose source
 	// branch matches branch, or ErrNotFound if none exists.
 	FindMergeRequestForBranch(ctx context.Context, projectID int, branch string) (*MergeRequest, error)

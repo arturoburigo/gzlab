@@ -44,6 +44,7 @@ func (c *realClient) GetProjectByPath(ctx context.Context, path string) (*Projec
 // caps PerPage at 100, so this allows up to 10,000 merge requests per
 // project — a defensive ceiling, not a real-world limit.
 const maxMergeRequestPages = 100
+const maxPipelineJobPages = 100
 
 func (c *realClient) ListMergeRequests(ctx context.Context, projectID int, opts ListMergeRequestsOptions) ([]*MergeRequest, error) {
 	state := string(opts.State)
@@ -95,6 +96,78 @@ func (c *realClient) GetMergeRequest(ctx context.Context, projectID, iid int) (*
 	// Approvals are a GitLab Premium feature; a failure here (e.g. 403 on
 	// Free tier) shouldn't block showing the rest of the MR.
 
+	return result, nil
+}
+
+func (c *realClient) ListMergeRequestDiffs(ctx context.Context, projectID, iid int) ([]*MergeRequestDiff, error) {
+	listOpts := &gl.ListMergeRequestDiffsOptions{
+		ListOptions: gl.ListOptions{PerPage: 100, Page: 1},
+	}
+
+	var result []*MergeRequestDiff
+	for page := 1; page <= maxMergeRequestPages; page++ {
+		listOpts.Page = int64(page)
+		diffs, resp, err := c.api.MergeRequests.ListMergeRequestDiffs(projectID, int64(iid), listOpts, gl.WithContext(ctx))
+		if err != nil {
+			if resp != nil && resp.StatusCode == 404 {
+				return nil, fmt.Errorf("merge request !%d diffs: %w", iid, ErrNotFound)
+			}
+			return c.showMergeRequestRawDiffs(ctx, projectID, iid, err)
+		}
+		for _, diff := range diffs {
+			result = append(result, toMergeRequestDiff(diff))
+		}
+		if resp == nil || resp.NextPage == 0 {
+			break
+		}
+	}
+	return result, nil
+}
+
+func (c *realClient) showMergeRequestRawDiffs(ctx context.Context, projectID, iid int, structuredErr error) ([]*MergeRequestDiff, error) {
+	raw, resp, err := c.api.MergeRequests.ShowMergeRequestRawDiffs(projectID, int64(iid), &gl.ShowMergeRequestRawDiffsOptions{}, gl.WithContext(ctx))
+	if err != nil {
+		if resp != nil && resp.StatusCode == 404 {
+			return nil, fmt.Errorf("merge request !%d raw diffs: %w", iid, ErrNotFound)
+		}
+		return nil, fmt.Errorf("listing merge request !%d diffs: %w; raw diff fallback also failed: %w", iid, structuredErr, err)
+	}
+	return []*MergeRequestDiff{{Diff: string(raw)}}, nil
+}
+
+func (c *realClient) GetPipeline(ctx context.Context, projectID, pipelineID int) (*Pipeline, error) {
+	pipeline, resp, err := c.api.Pipelines.GetPipeline(projectID, int64(pipelineID), gl.WithContext(ctx))
+	if err != nil {
+		if resp != nil && resp.StatusCode == 404 {
+			return nil, fmt.Errorf("pipeline %d: %w", pipelineID, ErrNotFound)
+		}
+		return nil, fmt.Errorf("fetching pipeline %d: %w", pipelineID, err)
+	}
+	return toPipeline(pipeline), nil
+}
+
+func (c *realClient) ListPipelineJobs(ctx context.Context, projectID, pipelineID int) ([]*Job, error) {
+	listOpts := &gl.ListJobsOptions{
+		ListOptions: gl.ListOptions{PerPage: 100, Page: 1},
+	}
+
+	var result []*Job
+	for page := 1; page <= maxPipelineJobPages; page++ {
+		listOpts.Page = int64(page)
+		jobs, resp, err := c.api.Jobs.ListPipelineJobs(projectID, int64(pipelineID), listOpts, gl.WithContext(ctx))
+		if err != nil {
+			if resp != nil && resp.StatusCode == 404 {
+				return nil, fmt.Errorf("pipeline %d jobs: %w", pipelineID, ErrNotFound)
+			}
+			return nil, fmt.Errorf("listing pipeline %d jobs: %w", pipelineID, err)
+		}
+		for _, job := range jobs {
+			result = append(result, toJob(job))
+		}
+		if resp == nil || resp.NextPage == 0 {
+			break
+		}
+	}
 	return result, nil
 }
 

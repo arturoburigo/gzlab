@@ -25,7 +25,7 @@ against `gitlab.services.betha.cloud`.
 | 7 — Dashboard Inicial | 🚧 | Single screen: profile, project, branch, current-branch MR, pipeline, approvals. **Deferred:** recent-projects/recent-branches cards, `?` help overlay, empty/error states beyond the basic error screen — full multi-card dashboard needs Épicos 8/9 data first. |
 | 11 — Listagem de Merge Requests | 🚧 | Open MRs for the current project (`m` key), IID/title/state/draft. **Deferred:** cross-project filters (minhas MRs, atribuídas a mim, para revisar, por label/autor) — those need the global `/merge_requests` scope and labels, not just project-scoped listing. |
 | 12 — Detalhe de Merge Request | 🚧 | Branches, author, status, pipeline, approvals, conflicts. **Deferred:** discussions/commits/changed-files tabs and the "Why blocked?" panel — need Épicos 13 (diff) and 16 (discussions) first. |
-| 25 — Testes | 🚧 | Unit tests alongside every package built this session (config, gitlab mapping, gitdetect — including real throwaway git repos, dashboard with a mock client, TUI `Update`/`View` with injected messages). **Deferred:** CLI-level integration tests, diff/log parser tests (those parsers don't exist yet). |
+| 25 — Testes | 🚧 | Unit tests alongside every package (config, gitlab mapping, gitdetect — including real throwaway git repos, dashboard with a mock client, TUI `Update`/`View` with injected messages), now also covering the diff/side-by-side/whitespace parsers and the job-log trace parser (ANSI/section-marker stripping) added in Fase 2. **Deferred:** CLI-level integration tests. |
 
 Untouched this session, all tasks from the plan doc still apply as written:
 
@@ -33,17 +33,17 @@ Untouched this session, all tasks from the plan doc still apply as written:
 - **9 — Branches Recentes** — backlog, same as above plus MR association.
 - **10 — Busca Global** — backlog.
 
-## Fase 2 — Valor real para review (backlog)
+## Fase 2 — Valor real para review
 
-- **13 — Diff Viewer** — side-by-side/unified rendering, hunk navigation, search.
-- **14 — Pipeline da MR** — stage/job breakdown beyond the current one-line status, retry/cancel.
-- **15 — Logs de Job** — log viewer, search, jump-to-error, retry, follow mode.
+- 🚧 **13 — Diff Viewer** — unified and side-by-side rendering (`s` toggle), file/hunk navigation, search (`/`, `n`/`N`), whitespace toggle (`w`), open file in `$EDITOR` (`e`). Side-by-side pairs removal/addition runs block-wise (not full intraline/LCS diffing) and reuses the unified scroll offset as an approximation, so it can drift a little inside hunks with uneven +/- counts; search-match highlighting only applies in unified mode. **Deferred:** context expansion, copy hunk/line, per-file loading state, large-diff fallback.
+- 🚧 **14 — Pipeline da MR** — stages, jobs, status/duration/ref/source, retry job (`R`), retry pipeline (`P`, via `glab api` — `glab ci` has no pipeline-level retry subcommand), cancel pipeline (`x`, confirms), manual job trigger (`t`). **Deferred:** who started the pipeline (`Pipeline` has no `User` field yet), real-time status updates (refresh is manual via `r`, no polling).
+- 🚧 **15 — Logs de Job** — log viewer (`enter` from the pipeline job list), search (`/`, `n`/`N`), jump-to-error (`e`/`E`) with highlighting, retry job (`R`, shared with the pipeline screen). Trace fetched via `glab api projects/:id/jobs/<id>/trace` (one-shot, not `ci trace`'s follow mode). **Deferred:** follow mode (live tail for a running job — needs async polling in the Bubble Tea loop, not just a one-shot fetch), copy line/block, save log to file, paginated download for very large logs.
 
-## Fase 3 — Histórico e produtividade (backlog)
+## Fase 3 — Histórico e produtividade (in progress)
 
-- **16 — Discussões e Comentários**
-- **17 — Ações de MR** (approve, draft/ready, merge, checkout)
-- **18 — Checkout de Branch/MR**
+- 🚧 **17 — Ações de MR** — approve (`a`), revoke approval (`A`, confirms), draft/ready toggle (`w`), merge (`M`, confirms), checkout branch (`b`, re-detects the local branch via `gitdetect.CurrentBranch` after switching and updates `dash.Branch`). Confirmation required for merge/revoke, matching the plan's "Segurança UX" list. Retry/cancel pipeline and manual job trigger reuse the pipeline-screen actions (Épico 14/15) instead of duplicating them here — there's no job list on the detail screen to pick a specific manual job from. **Deferred:** reviewer/assignee/label management (explicitly future per the plan).
+- 🚧 **16 — Discussões e Comentários** — discussions screen (`c` from MR detail) via `glab api projects/:id/merge_requests/:iid/discussions`. Threads are navigable (`j`/`k` moves a thread cursor, `g`/`G` top/end); the display policy (`discussionView` in `discuss_view.go`) hides system notes, marks resolvable threads `✓`/`○`, and indents replies. Add a comment (`c` to compose, single-line, posts via `glab mr note`); resolve/reopen the selected thread (`t`, via `glab api PUT .../discussions/:id?resolved=`). **Deferred:** multi-line comment composition, reply-to-a-specific-thread (vs. a new MR-level discussion), pagination beyond the first per_page=100.
+- 🚧 **18 — Checkout de Branch/MR** — `b` (from MR detail) now inspects the working tree first via `gitdetect.HasUncommittedChanges` and, if it's dirty, confirms before `glab mr checkout` so a switch can't silently clobber uncommitted work; a clean tree checks out directly. `glab mr checkout` already creates/tracks the local branch. **Deferred:** refreshing a recent-branches list (needs Épico 9's persistence store, which doesn't exist yet).
 - **19 — Workspace Multi-Repo**
 - **20 — Resumo Copiável**
 - **21 — Cache Local**
@@ -51,7 +51,7 @@ Untouched this session, all tasks from the plan doc still apply as written:
 ## Fase 4/5 and polish (backlog)
 
 - **22 — UI Base** (multi-panel layout, themes, mouse) — current TUI is a single-panel screen sequence, not the three-area layout from §4 of the plan; revisit once there's enough screens to justify it.
-- **23 — Atalhos** — current bindings (`o`/`y`/`r`/`m`/`q`/`esc`/`j`/`k`/`enter`) are a subset of the plan's full shortcut table; the rest depend on features not built yet (diff, pipeline, comments).
+- **23 — Atalhos** — most of the plan's suggested table is bound now (global: `o`/`y`/`r`/`m`/`q`/`esc`/`j`/`k`/`enter`; diff: `h`/`l`/`[`/`]`/`/`/`n`/`N`/`s`/`w`/`e`; pipeline: `R`/`P`/`t`/`x`; job log: `/`/`n`/`N`/`e`/`E`/`R`; MR detail: `c`/`a`/`A`/`w`/`M`/`b`/`x`; discussions: `c` (compose)/`t` (resolve)/`j`/`k`/`g`/`G`). Deliberately kept `r` = refresh everywhere instead of the plan's per-screen "r = retry job" suggestion, to stay consistent across screens — see BACKLOG notes on 14/15. Still missing: `?` help overlay, `Tab`/`Shift+Tab` panel switching (no multi-panel layout yet — see 22). Comment shortcuts landed with Épico 16 (`c`).
 - **24 — CLI Complementar** (`mr list`, `mr view`, `mr checkout`, `pipeline list/logs` as standalone commands, not just inside the TUI).
 - **26 — Distribuição** (cross-platform binaries, releases, install script).
 

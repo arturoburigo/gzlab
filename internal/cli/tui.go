@@ -50,10 +50,11 @@ func runTUI(cmd *cobra.Command, args []string) error {
 		Config:          cfg,
 		NewClient:       newClientForProfile,
 		Remote:          remote,
+		RepoRoot:        repoRoot,
 		Branch:          branch,
 		ProfileOverride: profileFlag,
 	}
 
-	_, err = tea.NewProgram(tui.New(deps)).Run()
+	_, err = tea.NewProgram(tui.New(deps), tea.WithAltScreen()).Run()
 	return err
 }

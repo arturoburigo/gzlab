@@ -7,37 +7,34 @@ import (
 
 func (m Model) renderDashboard() string {
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("GitLab TUI") + "\n\n")
-	b.WriteString(labelStyle.Render("Profile: ") + m.dash.ProfileName + "\n")
-	b.WriteString(labelStyle.Render("Project: ") + m.dash.Project.PathWithNamespace + "\n")
-	b.WriteString(labelStyle.Render("Branch:  ") + m.dash.Branch + "\n\n")
+	b.WriteString(titleStyle.Render("GitLab TUI") + "\n")
+	b.WriteString(ruleStyle.Render(strings.Repeat("─", 48)) + "\n\n")
+	b.WriteString(kv("profile", valueStyle.Render(m.dash.ProfileName)) + "\n")
+	b.WriteString(kv("project", m.dash.Project.PathWithNamespace) + "\n")
+	b.WriteString(kv("branch", m.dash.Branch) + "\n\n")
 
 	if m.dash.MergeRequest == nil {
-		b.WriteString("No open merge request for this branch.\n\n")
+		b.WriteString(footerStyle.Render("No open merge request for this branch.") + "\n")
 	} else {
 		mr := m.dash.MergeRequest
-		fmt.Fprintf(&b, "MR: !%d — %s\n", mr.IID, mr.Title)
-		b.WriteString(labelStyle.Render("Status:    ") + string(mr.State) + draftSuffix(mr) + "\n")
-		b.WriteString(labelStyle.Render("Pipeline:  ") + renderPipeline(mr.Pipeline) + "\n")
+		fmt.Fprintf(&b, "%s !%d %s\n", tableHead.Render("MR"), mr.IID, mr.Title)
+		b.WriteString(kv("status", string(mr.State)+draftSuffix(mr)) + "\n")
+		b.WriteString(kv("pipeline", renderPipeline(mr.Pipeline)) + "\n")
 		if mr.ApprovalsRequired > 0 {
-			fmt.Fprintf(&b, "%s%d/%d\n", labelStyle.Render("Approvals: "), mr.ApprovalsGiven, mr.ApprovalsRequired)
+			b.WriteString(kv("approvals", fmt.Sprintf("%d/%d", mr.ApprovalsGiven, mr.ApprovalsRequired)) + "\n")
 		}
-		b.WriteString("\n")
 	}
 
-	if m.status != "" {
-		b.WriteString(footerStyle.Render(m.status) + "\n\n")
-	}
-
-	b.WriteString(m.dashboardFooter())
 	return b.String()
 }
 
-func (m Model) dashboardFooter() string {
-	actions := []string{"m merge requests"}
-	if m.currentURL() != "" {
-		actions = append(actions, "o open browser", "y copy link")
+func (m Model) dashboardHints() []hint {
+	actions := []hint{{"m", "merge requests"}}
+	if m.dash.MergeRequest != nil {
+		actions = append(actions, hint{"enter", "detail"})
 	}
-	actions = append(actions, "r refresh", "q quit")
-	return joinFooter(actions...)
+	if m.currentURL() != "" {
+		actions = append(actions, hint{"o", "open"}, hint{"y", "copy link"})
+	}
+	return append(actions, hint{"r", "refresh"}, hint{"q", "quit"})
 }

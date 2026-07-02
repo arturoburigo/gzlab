@@ -15,6 +15,7 @@ import (
 	"github.com/arturoburigo/gitlab-tui/internal/config"
 	"github.com/arturoburigo/gitlab-tui/internal/dashboard"
 	"github.com/arturoburigo/gitlab-tui/internal/gitlab"
+	"github.com/arturoburigo/gitlab-tui/internal/history"
 )
 
 type mockClient struct {
@@ -1530,6 +1531,55 @@ func TestHandleKey_CopySummary(t *testing.T) {
 	noMR.dash.MergeRequest = nil
 	if _, cmd := noMR.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("Y")}); cmd != nil {
 		t.Fatalf("expected no command when no MR is in context, got %T", cmd())
+	}
+}
+
+func TestRecordHistory_WritesProjectAndBranch(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "history.json")
+	recordHistory(path, testDashContext())
+
+	store, err := history.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	projects := store.Projects("empresa")
+	if len(projects) != 1 || projects[0].Path != "atendimento/protocolo/cadastros/api-protocolo-cadastros" {
+		t.Fatalf("recorded projects = %+v", projects)
+	}
+	branches := store.Branches("empresa")
+	if len(branches) != 1 || branches[0].Name != "bugfix-PD-26527" || branches[0].MRIID != 251 {
+		t.Fatalf("recorded branches = %+v", branches)
+	}
+}
+
+func TestUpdate_DashboardLoaded_RecordsHistoryWhenConfigured(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "history.json")
+	m := New(Deps{
+		HistoryPath: path,
+		NewClient:   func(config.Profile) (gitlab.Client, error) { return &mockClient{}, nil },
+	})
+
+	_, cmd := m.Update(dashboardLoadedMsg{ctx: testDashContext()})
+	if cmd == nil {
+		t.Fatal("expected a record-history command when HistoryPath is set")
+	}
+	if msg := cmd(); msg != nil {
+		t.Errorf("recordHistoryCmd emitted %v, want no message", msg)
+	}
+
+	store, err := history.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(store.Branches("empresa")) != 1 {
+		t.Errorf("expected one recorded branch, got %+v", store.Branches("empresa"))
+	}
+}
+
+func TestUpdate_DashboardLoaded_NoHistoryPathIsNoop(t *testing.T) {
+	m := New(Deps{NewClient: func(config.Profile) (gitlab.Client, error) { return &mockClient{}, nil }})
+	if _, cmd := m.Update(dashboardLoadedMsg{ctx: testDashContext()}); cmd != nil {
+		t.Fatalf("expected no history command without a HistoryPath, got %T", cmd())
 	}
 }
 

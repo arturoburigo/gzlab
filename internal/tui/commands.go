@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"time"
 
 	"github.com/atotto/clipboard"
 	tea "github.com/charmbracelet/bubbletea"
@@ -15,6 +16,7 @@ import (
 	"github.com/arturoburigo/gitlab-tui/internal/dashboard"
 	"github.com/arturoburigo/gitlab-tui/internal/gitdetect"
 	"github.com/arturoburigo/gitlab-tui/internal/gitlab"
+	"github.com/arturoburigo/gitlab-tui/internal/history"
 )
 
 func loadDashboardCmd(deps Deps) tea.Cmd {
@@ -25,6 +27,49 @@ func loadDashboardCmd(deps Deps) tea.Cmd {
 		}
 		return dashboardLoadedMsg{ctx}
 	}
+}
+
+// recordHistoryCmd records the resolved project/branch/MR into the local
+// history store, off the main loop. It's best-effort: any failure is swallowed
+// (history is a convenience, never a blocker) and it emits no message.
+func recordHistoryCmd(deps Deps, ctx *dashboard.Context) tea.Cmd {
+	if deps.HistoryPath == "" || ctx == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		recordHistory(deps.HistoryPath, ctx)
+		return nil
+	}
+}
+
+func recordHistory(path string, ctx *dashboard.Context) {
+	store, err := history.Load(path)
+	if err != nil {
+		return
+	}
+
+	now := time.Now()
+	if ctx.Project != nil {
+		store.RecordProject(ctx.ProfileName, history.Project{
+			Path:       ctx.Project.PathWithNamespace,
+			Name:       ctx.Project.Name,
+			LastAccess: now,
+		})
+	}
+
+	branch := history.Branch{Name: ctx.Branch, LastAccess: now}
+	if ctx.Project != nil {
+		branch.ProjectPath = ctx.Project.PathWithNamespace
+	}
+	if ctx.MergeRequest != nil {
+		branch.MRIID = ctx.MergeRequest.IID
+		branch.MRTitle = ctx.MergeRequest.Title
+	}
+	if branch.Name != "" {
+		store.RecordBranch(ctx.ProfileName, branch)
+	}
+
+	_ = history.Save(path, store)
 }
 
 func loadMRListCmd(client gitlab.Client, projectID int) tea.Cmd {

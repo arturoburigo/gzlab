@@ -9,6 +9,7 @@ import (
 
 	"github.com/arturoburigo/gitlab-tui/internal/config"
 	"github.com/arturoburigo/gitlab-tui/internal/gitdetect"
+	"github.com/arturoburigo/gitlab-tui/internal/history"
 	"github.com/arturoburigo/gitlab-tui/internal/tui"
 )
 
@@ -46,6 +47,11 @@ func runTUI(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	historyPath, err := history.DefaultPath()
+	if err != nil {
+		return err
+	}
+
 	deps := tui.Deps{
 		Config:          cfg,
 		NewClient:       newClientForProfile,
@@ -53,6 +59,7 @@ func runTUI(cmd *cobra.Command, args []string) error {
 		RepoRoot:        repoRoot,
 		Branch:          branch,
 		ProfileOverride: profileFlag,
+		HistoryPath:     historyPath,
 	}
 
 	_, err = tea.NewProgram(tui.New(deps), tea.WithAltScreen()).Run()

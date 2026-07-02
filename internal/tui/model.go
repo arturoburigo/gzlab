@@ -38,6 +38,7 @@ type Deps struct {
 	RepoRoot        string
 	Branch          string
 	ProfileOverride string
+	HistoryPath     string
 	RunGLab         glabRunner
 }
 
@@ -109,7 +110,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.client = client
-		return m, nil
+		return m, recordHistoryCmd(m.deps, msg.ctx)
 
 	case mrListLoadedMsg:
 		m.loading = false

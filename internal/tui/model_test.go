@@ -560,6 +560,108 @@ func TestIsWhitespaceOnlyDiffLine(t *testing.T) {
 	}
 }
 
+func TestCommonDiffIndent(t *testing.T) {
+	// Shared 6-space indent across context/+/- lines; blank lines and metadata
+	// don't constrain it.
+	lines := []string{
+		"@@ -1,3 +1,3 @@",
+		"       ctx();",   // context, 6 spaces of body indent
+		"-        old();",  // removal, 8
+		"+        new();",  // addition, 8
+		"+",                // blank addition — ignored
+		"--- a/file.go",    // metadata — ignored
+	}
+	if got := commonDiffIndent(lines); got != 6 {
+		t.Errorf("commonDiffIndent = %d, want 6 (the shallowest code line)", got)
+	}
+
+	// A top-level (unindented) line drops the common indent to 0.
+	if got := commonDiffIndent([]string{"+top();", "+    nested();"}); got != 0 {
+		t.Errorf("commonDiffIndent with a top-level line = %d, want 0", got)
+	}
+}
+
+func TestDedentDiffLine(t *testing.T) {
+	cases := []struct {
+		line string
+		n    int
+		want string
+	}{
+		{"       ctx();", 6, " ctx();"},        // context: marker kept, 6 stripped
+		{"-        old();", 6, "-  old();"},     // removal: relative indent preserved
+		{"+        new();", 6, "+  new();"},     // addition
+		{"+  short();", 6, "+short();"},         // fewer than n spaces: strips only what's there
+		{"@@ -1 +1 @@", 6, "@@ -1 +1 @@"},       // hunk header untouched
+		{"+++ b/file.go", 6, "+++ b/file.go"},   // metadata untouched
+		{"--- a/file.go", 6, "--- a/file.go"},   // metadata untouched
+		{"-        old();", 0, "-        old();"}, // n=0 is a no-op
+	}
+	for _, c := range cases {
+		if got := dedentDiffLine(c.line, c.n); got != c.want {
+			t.Errorf("dedentDiffLine(%q, %d) = %q, want %q", c.line, c.n, got, c.want)
+		}
+	}
+}
+
+func TestRenderDiff_DedentsPerHunk(t *testing.T) {
+	// Two hunks at very different depths in the SAME file. Per-hunk dedent must
+	// strip each hunk's own indent, so the deep hunk isn't held back by the
+	// shallow hunk's smaller indent (the per-file-min bug). Real diffs prefix
+	// context lines with a space marker, so context and +/- lines at the same
+	// source indent share the same body indent.
+	sp := func(n int) string { return strings.Repeat(" ", n) }
+	raw := "diff --git a/app.js b/app.js\n" +
+		"--- a/app.js\n+++ b/app.js\n" +
+		"@@ -1,2 +1,2 @@\n" +
+		" " + sp(4) + "shallow();\n" +
+		"-" + sp(4) + "old();\n" +
+		"+" + sp(4) + "new();\n" +
+		"@@ -40,2 +40,2 @@\n" +
+		" " + sp(20) + "deep();\n" +
+		"-" + sp(20) + "oldDeep();\n" +
+		"+" + sp(20) + "newDeep();\n"
+	m := Model{width: 200, height: 40}
+	m.detail = &gitlab.MergeRequest{IID: 1, Title: "t"}
+	m.diff = newDiffState([]*gitlab.MergeRequestDiff{{Diff: raw}})
+
+	li := m.diff.files[0].lineIndents
+	if li[4] != 4 {
+		t.Errorf("shallow hunk indent = %d, want 4", li[4])
+	}
+	if li[8] != 20 {
+		t.Errorf("deep hunk indent = %d, want 20", li[8])
+	}
+
+	view := stripANSITest(m.renderCurrentDiffFile(190, 40))
+	// Under the old per-file dedent, the deep hunk would keep 20-4=16 spaces;
+	// per-hunk strips all 20, so no run of 10+ spaces should precede "deep".
+	if strings.Contains(view, sp(10)+"deep();") {
+		t.Errorf("deep hunk was not fully dedented (per-file-min bug)\n%s", view)
+	}
+	if !strings.Contains(view, " deep();") || !strings.Contains(view, " shallow();") {
+		t.Errorf("expected both hunks dedented to the left\n%s", view)
+	}
+}
+
+func stripANSITest(s string) string {
+	var b strings.Builder
+	inEsc := false
+	for i := 0; i < len(s); i++ {
+		if s[i] == 0x1b {
+			inEsc = true
+			continue
+		}
+		if inEsc {
+			if s[i] == 'm' {
+				inEsc = false
+			}
+			continue
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
+}
+
 func TestHandleKey_DiffWhitespaceToggle(t *testing.T) {
 	m := loadedModel(t, &mockClient{})
 	m.screen = screenDiff
@@ -619,7 +721,7 @@ func TestBuildSideBySideRows(t *testing.T) {
 		" context2",
 		"+added-only",
 	}
-	rows := buildSideBySideRows(lines)
+	rows := buildSideBySideRows(lines, hunkIndents(lines))
 	want := []sideBySideRow{
 		{span: "@@ -1,5 +1,5 @@"},
 		{left: " context1", right: " context1"},

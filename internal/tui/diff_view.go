@@ -37,6 +37,12 @@ type diffFile struct {
 	hunks     []diffHunk
 	additions int
 	deletions int
+	// lineIndents is, per rendered line, the common leading-whitespace width of
+	// that line's hunk — stripped at render time so a deeply-nested hunk isn't
+	// pushed off-screen by indentation every line in it shares. It's per-hunk
+	// (not per-file) so a shallow hunk elsewhere in the same file can't hold a
+	// deep hunk hostage to its smaller indent.
+	lineIndents []int
 }
 
 // diffLineNum is the old/new source line number a rendered diff row maps to;
@@ -211,7 +217,99 @@ func finalizeDiffFile(file *diffFile) {
 		}
 	}
 	file.lineNums = computeLineNumbers(file.lines)
+	file.lineIndents = hunkIndents(file.lines)
 	truncateDiffFile(file)
+}
+
+// hunkIndents returns, per line, the common leading-whitespace of the hunk that
+// line belongs to (0 for lines before the first hunk). Each "@@" starts a new
+// hunk whose indent is computed independently, so a deeply-nested hunk gets its
+// full indent stripped even when a shallower hunk shares the file.
+func hunkIndents(lines []string) []int {
+	indents := make([]int, len(lines))
+	i := 0
+	for i < len(lines) {
+		if !strings.HasPrefix(lines[i], "@@") {
+			i++
+			continue
+		}
+		start := i
+		i++
+		for i < len(lines) && !strings.HasPrefix(lines[i], "@@") {
+			i++
+		}
+		indent := commonDiffIndent(lines[start:i])
+		for j := start; j < i; j++ {
+			indents[j] = indent
+		}
+	}
+	return indents
+}
+
+// diffLineMarker reports the unified-diff marker char of a content line — '+',
+// '-', or ' ' (context) — and whether line is a content line at all (false for
+// "@@", "+++"/"---", "diff --git", etc.). Body is what follows the marker.
+func diffLineMarker(line string) (marker byte, isContent bool) {
+	if line == "" {
+		return 0, false
+	}
+	switch line[0] {
+	case '+':
+		return '+', !strings.HasPrefix(line, "+++")
+	case '-':
+		return '-', !strings.HasPrefix(line, "---")
+	case ' ':
+		return ' ', true
+	default:
+		return 0, false
+	}
+}
+
+// commonDiffIndent is the largest leading-space count shared by every non-blank
+// code line's body (textwrap.dedent-style). Stripping it preserves the diff's
+// relative indentation while reclaiming the horizontal room a deeply-nested
+// block wastes on indentation identical on every line.
+func commonDiffIndent(lines []string) int {
+	min := -1
+	for _, line := range lines {
+		if _, ok := diffLineMarker(line); !ok {
+			continue
+		}
+		body := line[1:]
+		if strings.TrimSpace(body) == "" {
+			continue // blank lines don't constrain the common indent
+		}
+		indent := len(body) - len(strings.TrimLeft(body, " "))
+		if min < 0 || indent < min {
+			min = indent
+		}
+		if min == 0 {
+			break
+		}
+	}
+	if min < 0 {
+		return 0
+	}
+	return min
+}
+
+// dedentDiffLine strips up to n leading spaces from a content line's body,
+// keeping its +/-/space marker; non-content lines (headers/metadata) pass
+// through untouched.
+func dedentDiffLine(line string, n int) string {
+	if n <= 0 {
+		return line
+	}
+	marker, ok := diffLineMarker(line)
+	if !ok {
+		return line
+	}
+	body := line[1:]
+	stripped := 0
+	for stripped < n && stripped < len(body) && body[stripped] == ' ' {
+		stripped++
+	}
+	return string(marker) + body[stripped:]
 }
 
 // truncateDiffFile trims file.lines/hunks to maxDiffFileLines for display.
@@ -225,6 +323,7 @@ func truncateDiffFile(file *diffFile) {
 	file.lines = append(file.lines[:maxDiffFileLines:maxDiffFileLines],
 		fmt.Sprintf("… diff truncated: showing %d of %d lines; press 'o' to open the full file in the browser …", maxDiffFileLines, total))
 	file.lineNums = append(file.lineNums[:maxDiffFileLines:maxDiffFileLines], diffLineNum{})
+	file.lineIndents = append(file.lineIndents[:maxDiffFileLines:maxDiffFileLines], 0)
 	file.flags = appendUnique(file.flags, "truncated")
 
 	kept := file.hunks[:0]
@@ -444,16 +543,22 @@ func (m Model) renderCurrentDiffFile(width, height int) string {
 		if idx < len(file.lineNums) {
 			gutter = diffGutter(file.lineNums[idx])
 		}
-		b.WriteString(gutter + renderDiffLine(line, m.diffHideWhitespace, active, m.diff.searchQuery) + "\n")
+		indent := 0
+		if idx < len(file.lineIndents) {
+			indent = file.lineIndents[idx]
+		}
+		b.WriteString(gutter + renderDiffLine(line, file.path, indent, m.diffHideWhitespace, active, m.diff.searchQuery) + "\n")
 	}
 	return clampBlock(b.String(), width, height)
 }
 
-// sideBySideRow is one visual row of the side-by-side diff view.
+// sideBySideRow is one visual row of the side-by-side diff view. indent is the
+// per-hunk leading-whitespace stripped from both cells (see diffFile.lineIndents).
 type sideBySideRow struct {
-	left  string
-	right string
-	span  string
+	left   string
+	right  string
+	span   string
+	indent int
 }
 
 // buildSideBySideRows pairs up a unified diff's line-level removal/addition
@@ -461,8 +566,15 @@ type sideBySideRow struct {
 // index-wise against the run of "+" lines that follows it (the shorter run
 // pads with a blank cell), which is how most terminal diff viewers do
 // side-by-side without full intraline (LCS) diffing. Context/header lines
-// mirror unchanged on both sides.
-func buildSideBySideRows(lines []string) []sideBySideRow {
+// mirror unchanged on both sides. lineIndents carries each source line's
+// per-hunk dedent width onto the rows it produces.
+func buildSideBySideRows(lines []string, lineIndents []int) []sideBySideRow {
+	indentAt := func(i int) int {
+		if i >= 0 && i < len(lineIndents) {
+			return lineIndents[i]
+		}
+		return 0
+	}
 	rows := make([]sideBySideRow, 0, len(lines))
 	i := 0
 	for i < len(lines) {
@@ -473,6 +585,7 @@ func buildSideBySideRows(lines []string) []sideBySideRow {
 			rows = append(rows, sideBySideRow{span: lines[i]})
 			i++
 		case isDiffRemoval(lines[i]):
+			indent := indentAt(i)
 			var removals, additions []string
 			for i < len(lines) && isDiffRemoval(lines[i]) {
 				removals = append(removals, lines[i])
@@ -484,7 +597,7 @@ func buildSideBySideRows(lines []string) []sideBySideRow {
 			}
 			n := max(len(removals), len(additions))
 			for j := range n {
-				var row sideBySideRow
+				row := sideBySideRow{indent: indent}
 				if j < len(removals) {
 					row.left = removals[j]
 				}
@@ -494,10 +607,10 @@ func buildSideBySideRows(lines []string) []sideBySideRow {
 				rows = append(rows, row)
 			}
 		case isDiffAddition(lines[i]):
-			rows = append(rows, sideBySideRow{right: lines[i]})
+			rows = append(rows, sideBySideRow{right: lines[i], indent: indentAt(i)})
 			i++
 		default:
-			rows = append(rows, sideBySideRow{left: lines[i], right: lines[i]})
+			rows = append(rows, sideBySideRow{left: lines[i], right: lines[i], indent: indentAt(i)})
 			i++
 		}
 	}
@@ -542,7 +655,7 @@ func (m Model) renderCurrentDiffFileSideBySide(width, height int) string {
 		return clampBlock("No diff returned for this merge request.", width, height)
 	}
 
-	rows := buildSideBySideRows(file.lines)
+	rows := buildSideBySideRows(file.lines, file.lineIndents)
 	if len(rows) == 0 {
 		rows = []sideBySideRow{{left: "No textual changes in this file."}}
 	}
@@ -559,8 +672,8 @@ func (m Model) renderCurrentDiffFileSideBySide(width, height int) string {
 			b.WriteString(clampStyledLine(hunkStyle.Render(row.span), width) + "\n")
 			continue
 		}
-		left := m.sideBySideCell(row.left, colWidth)
-		right := m.sideBySideCell(row.right, colWidth)
+		left := m.sideBySideCell(row.left, colWidth, file.path, row.indent)
+		right := m.sideBySideCell(row.right, colWidth, file.path, row.indent)
 		b.WriteString(left + ruleStyle.Render(" │ ") + right + "\n")
 	}
 	return clampBlock(b.String(), width, height)
@@ -574,12 +687,13 @@ func (m Model) sideBySideHeader(file diffFile, colWidth int) string {
 	return left + ruleStyle.Render(" │ ") + right
 }
 
-func (m Model) sideBySideCell(raw string, colWidth int) string {
-	truncated := raw
-	if lipgloss.Width(truncated) > colWidth {
-		truncated = truncate(truncated, colWidth)
+func (m Model) sideBySideCell(raw string, colWidth int, filename string, indent int) string {
+	// Style first (syntax highlighting emits per-token ANSI), then truncate
+	// with the ANSI-aware truncate so colour spans aren't cut mid-escape.
+	styled := renderSideBySideCell(dedentDiffLine(raw, indent), filename, m.diffHideWhitespace)
+	if lipgloss.Width(styled) > colWidth {
+		styled = truncate(styled, colWidth)
 	}
-	styled := renderSideBySideCell(truncated, m.diffHideWhitespace)
 	if pad := colWidth - lipgloss.Width(styled); pad > 0 {
 		styled += strings.Repeat(" ", pad)
 	}
@@ -618,14 +732,14 @@ func fitDiffCell(s string, width int) string {
 	return s
 }
 
-func renderSideBySideCell(line string, hideWhitespace bool) string {
+func renderSideBySideCell(line, filename string, hideWhitespace bool) string {
 	if line == "" {
 		return ""
 	}
 	if hideWhitespace && isWhitespaceOnlyDiffLine(line) {
 		return footerStyle.Render(string(line[0]) + " (ws)")
 	}
-	return styleDiffLineContent(line)
+	return styleDiffLineContent(line, filename)
 }
 
 func diffFileTitle(file diffFile) string {
@@ -684,16 +798,17 @@ func (m Model) diffLines() []string {
 // search style, other matches a dimmer one) instead of the whole line being
 // painted over — with N visible matches, "Match 3/17" used to give no
 // on-screen way to tell which of the other N-1 was which.
-func renderDiffLine(line string, hideWhitespace, activeMatch bool, query string) string {
+func renderDiffLine(line, filename string, indent int, hideWhitespace, activeMatch bool, query string) string {
+	line = dedentDiffLine(line, indent)
 	if hideWhitespace && isWhitespaceOnlyDiffLine(line) {
 		return footerStyle.Render(string(line[0]) + " (whitespace only)")
 	}
 	if query == "" {
-		return styleDiffLineContent(line)
+		return styleDiffLineContent(line, filename)
 	}
 	idx := strings.Index(strings.ToLower(line), strings.ToLower(query))
 	if idx < 0 {
-		return styleDiffLineContent(line)
+		return styleDiffLineContent(line, filename)
 	}
 	base := lineContentStyle(line)
 	matchStyle := searchDimStyle
@@ -704,8 +819,29 @@ func renderDiffLine(line string, hideWhitespace, activeMatch bool, query string)
 	return base.Render(before) + matchStyle.Render(match) + base.Render(after)
 }
 
-func styleDiffLineContent(line string) string {
-	return lineContentStyle(line).Render(line)
+// styleDiffLineContent colours one diff line: +/- lines keep a solid green/red
+// foreground (the diff signal), while context and other lines are
+// syntax-highlighted by language so the surrounding code reads in colour.
+func styleDiffLineContent(line, filename string) string {
+	switch {
+	case strings.HasPrefix(line, "diff --"):
+		return selectedStyle.Render(line)
+	case strings.HasPrefix(line, "@@"):
+		return hunkStyle.Render(line)
+	case isDiffAddition(line):
+		return additionStyle.Render(line)
+	case isDiffRemoval(line):
+		return deletionStyle.Render(line)
+	case isDiffMetadataLine(line):
+		return line
+	default:
+		// Context line: keep its leading space marker plain, syntax-highlight
+		// the code after it.
+		if len(line) > 0 && line[0] == ' ' {
+			return " " + highlightCode(filename, line[1:])
+		}
+		return highlightCode(filename, line)
+	}
 }
 
 func lineContentStyle(line string) lipgloss.Style {

@@ -4,10 +4,6 @@ A terminal UI for GitLab focused on the daily developer workflow: merge
 requests, diffs, pipelines and job logs — across multiple GitLab profiles
 (e.g. work and personal), without leaving the terminal.
 
-See [`gzlab-plano-completo.md`](./gzlab-plano-completo.md) for the
-full product plan and [`BACKLOG.md`](./BACKLOG.md) for the épico-by-épico
-backlog and progress.
-
 ## Demo
 
 <video src="https://github.com/arturoburigo/gzlab/raw/main/docs/presentation.mov" controls width="100%"></video>

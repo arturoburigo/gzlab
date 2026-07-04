@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/arturoburigo/gitlab-tui/internal/gitlab"
+	"github.com/charmbracelet/x/ansi"
+
+	"github.com/arturoburigo/gzlab/internal/gitlab"
 )
 
 // discussThread is a navigable entry on the discussions screen: one rendered
@@ -27,8 +29,8 @@ type discussState struct {
 	lineOffset  int
 }
 
-func newDiscussState(discussions []gitlab.Discussion) discussState {
-	lines, threads := discussionView(discussions)
+func newDiscussState(discussions []gitlab.Discussion, width int) discussState {
+	lines, threads := discussionView(discussions, width)
 	return discussState{discussions: discussions, lines: lines, threads: threads}
 }
 
@@ -37,11 +39,13 @@ func newDiscussState(discussions []gitlab.Discussion) discussState {
 // diff threads carry a resolved/unresolved state. The policy here:
 //   - hide system notes (drop a thread entirely if it has none left);
 //   - mark resolvable threads with ✓ (resolved) or ○ (open);
-//   - indent replies (the 2nd+ note in a thread).
+//   - indent replies (the 2nd+ note in a thread);
+//   - word-wrap bodies to width instead of clipping to one ellipsis line;
+//   - dim resolved threads and show file:line for code-anchored comments.
 //
 // It returns the flat display lines and, alongside, a navigable index of the
 // threads that survived filtering.
-func discussionView(discussions []gitlab.Discussion) ([]string, []discussThread) {
+func discussionView(discussions []gitlab.Discussion, width int) ([]string, []discussThread) {
 	var lines []string
 	var threads []discussThread
 
@@ -51,6 +55,7 @@ func discussionView(discussions []gitlab.Discussion) ([]string, []discussThread)
 			continue
 		}
 
+		resolved := d.Resolvable() && d.Resolved()
 		threads = append(threads, discussThread{
 			id:         d.ID,
 			resolvable: d.Resolvable(),
@@ -64,13 +69,27 @@ func discussionView(discussions []gitlab.Discussion) ([]string, []discussThread)
 				indent = "  " // replies sit under the thread opener
 			}
 
-			header := indent + resolveMarker(d, i) + discussHeaderStyle.Render(note.Author)
+			authorStyle := discussHeaderStyle
+			if resolved {
+				authorStyle = footerStyle
+			}
+			header := indent + resolveMarker(d, i) + authorStyle.Render(note.Author)
 			if !note.CreatedAt.IsZero() {
 				header += footerStyle.Render("  " + note.CreatedAt.Format("2006-01-02 15:04"))
 			}
 			lines = append(lines, header)
-			for _, body := range strings.Split(note.Body, "\n") {
-				lines = append(lines, indent+body)
+
+			if note.PositionPath != "" && note.PositionLine > 0 {
+				lines = append(lines, indent+"  "+footerStyle.Render(fmt.Sprintf("%s:%d", note.PositionPath, note.PositionLine)))
+			}
+
+			bodyWidth := max(10, width-len(indent))
+			for _, wline := range strings.Split(ansi.Wordwrap(note.Body, bodyWidth, ""), "\n") {
+				if resolved {
+					lines = append(lines, footerStyle.Render(indent+wline))
+					continue
+				}
+				lines = append(lines, indent+wline)
 			}
 			lines = append(lines, "")
 		}
@@ -88,10 +107,16 @@ func humanNotes(notes []gitlab.Note) []gitlab.Note {
 	return out
 }
 
-// resolveMarker returns the ✓/○ status glyph shown on a thread's opening note.
+// resolveMarker returns the ✓/○ status glyph shown on a thread's opening
+// note. Non-resolvable threads (plain top-level comments) get a blank
+// same-width placeholder instead of nothing, so author columns line up with
+// resolvable threads instead of sitting 2 cells further left.
 func resolveMarker(d gitlab.Discussion, noteIndex int) string {
-	if noteIndex != 0 || !d.Resolvable() {
+	if noteIndex != 0 {
 		return ""
+	}
+	if !d.Resolvable() {
+		return "  "
 	}
 	if d.Resolved() {
 		return discussResolvedStyle.Render("✓ ")
@@ -102,19 +127,9 @@ func resolveMarker(d gitlab.Discussion, noteIndex int) string {
 func (m Model) renderDiscussions() string {
 	height := m.discussBodyHeight()
 
-	title := "Discussions"
-	if m.detail != nil {
-		title = fmt.Sprintf("Discussions on !%d", m.detail.IID)
-	}
-
-	var b strings.Builder
-	b.WriteString(titleStyle.Render(title) + "\n")
-	b.WriteString(ruleStyle.Render(strings.Repeat("─", 72)) + "\n")
-
 	lines := m.discuss.lines
 	if len(lines) == 0 {
-		b.WriteString(footerStyle.Render("No comments yet. Press c to add one.") + "\n")
-		return b.String()
+		return footerStyle.Render("No comments yet. Press c to add one.") + "\n"
 	}
 
 	selectedHeader := -1
@@ -122,12 +137,13 @@ func (m Model) renderDiscussions() string {
 		selectedHeader = thread.headerLine
 	}
 
+	var b strings.Builder
 	start := min(m.discuss.lineOffset, max(0, len(lines)-1))
 	end := min(start+height, len(lines))
 	for i := start; i < end; i++ {
-		gutter := "  "
+		gutter := emptyMarker
 		if i == selectedHeader {
-			gutter = cursorStyle.Render("> ")
+			gutter = cursorStyle.Render(cursorMarker)
 		}
 		b.WriteString(gutter + lines[i] + "\n")
 	}
@@ -136,18 +152,21 @@ func (m Model) renderDiscussions() string {
 
 func (m Model) discussHints() []hint {
 	hints := []hint{{"j/k", "thread"}, {"g/G", "top/end"}, {"c", "comment"}}
-	if thread, ok := m.discuss.currentThread(); ok && thread.resolvable {
-		label := "resolve"
-		if thread.resolved {
-			label = "unresolve"
+	if thread, ok := m.discuss.currentThread(); ok {
+		hints = append(hints, hint{"R", "reply"})
+		if thread.resolvable {
+			label := "resolve"
+			if thread.resolved {
+				label = "unresolve"
+			}
+			hints = append(hints, hint{"t", label})
 		}
-		hints = append(hints, hint{"t", label})
 	}
 	return append(hints, hint{"o", "open"}, hint{"r", "refresh"}, hint{"esc", "back"}, hint{"q", "quit"})
 }
 
 func (m Model) discussBodyHeight() int {
-	return max(3, m.contentHeight()-2)
+	return max(3, m.contentHeight())
 }
 
 func (d discussState) currentThread() (discussThread, bool) {

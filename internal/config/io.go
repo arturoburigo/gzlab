@@ -9,7 +9,7 @@ import (
 )
 
 // ErrNotFound is returned by Load when the config file doesn't exist yet.
-var ErrNotFound = fmt.Errorf("config file not found; run `gitlab-tui auth login` to create one")
+var ErrNotFound = fmt.Errorf("config file not found; run `gzlab auth login` to create one")
 
 // Load reads and parses the config file at path.
 func Load(path string) (*Config, error) {

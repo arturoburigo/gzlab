@@ -5,9 +5,9 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/arturoburigo/gitlab-tui/internal/config"
-	"github.com/arturoburigo/gitlab-tui/internal/gitdetect"
-	"github.com/arturoburigo/gitlab-tui/internal/gitlab"
+	"github.com/arturoburigo/gzlab/internal/config"
+	"github.com/arturoburigo/gzlab/internal/gitdetect"
+	"github.com/arturoburigo/gzlab/internal/gitlab"
 )
 
 // mockClient is a minimal test double for gitlab.Client.
@@ -32,6 +32,14 @@ func (m *mockClient) ListMergeRequests(ctx context.Context, projectID int, opts 
 	return nil, nil
 }
 
+func (m *mockClient) ListMyMergeRequests(ctx context.Context, opts gitlab.ListMyMergeRequestsOptions) ([]*gitlab.MergeRequest, error) {
+	return nil, nil
+}
+
+func (m *mockClient) Search(ctx context.Context, opts gitlab.GlobalSearchOptions) ([]gitlab.GlobalSearchResult, error) {
+	return nil, nil
+}
+
 func (m *mockClient) GetMergeRequest(ctx context.Context, projectID, iid int) (*gitlab.MergeRequest, error) {
 	return m.mr, nil
 }
@@ -53,6 +61,14 @@ func (m *mockClient) FindMergeRequestForBranch(ctx context.Context, projectID in
 		return nil, m.findMRErr
 	}
 	return m.mr, nil
+}
+
+func (m *mockClient) ListCommits(ctx context.Context, projectID int, opts gitlab.ListCommitsOptions) ([]gitlab.Commit, error) {
+	return nil, nil
+}
+
+func (m *mockClient) ListMyContributionEvents(ctx context.Context, opts gitlab.ListContributionEventsOptions) ([]gitlab.ContributionEvent, error) {
+	return nil, nil
 }
 
 func testConfig() *config.Config {

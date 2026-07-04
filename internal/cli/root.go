@@ -1,4 +1,4 @@
-// Package cli wires the gitlab-tui command tree.
+// Package cli wires the gzlab command tree.
 package cli
 
 import (
@@ -6,17 +6,17 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/arturoburigo/gitlab-tui/internal/version"
+	"github.com/arturoburigo/gzlab/internal/version"
 )
 
 var profileFlag string
 
-// NewRootCommand builds the root `gitlab-tui` command and its subcommands.
+// NewRootCommand builds the root `gzlab` command and its subcommands.
 func NewRootCommand() *cobra.Command {
 	root := &cobra.Command{
-		Use:   "gitlab-tui",
+		Use:   "gzlab",
 		Short: "A terminal UI for GitLab merge requests, diffs and pipelines",
-		Long: `gitlab-tui is a terminal UI for GitLab focused on the daily developer
+		Long: `gzlab is a terminal UI for GitLab focused on the daily developer
 workflow: merge requests, diffs, pipelines and job logs, across multiple
 GitLab profiles (e.g. work and personal).`,
 		SilenceUsage:  true,
@@ -30,6 +30,8 @@ GitLab profiles (e.g. work and personal).`,
 	root.AddCommand(newAuthCommand())
 	root.AddCommand(newProfileCommand())
 	root.AddCommand(newMRCommand())
+	root.AddCommand(newPipelineCommand())
+	root.AddCommand(newCacheCommand())
 
 	return root
 }
@@ -37,7 +39,7 @@ GitLab profiles (e.g. work and personal).`,
 func newVersionCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:   "version",
-		Short: "Print the gitlab-tui version",
+		Short: "Print the gzlab version",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			_, err := fmt.Fprintln(cmd.OutOrStdout(), version.String())
 			return err

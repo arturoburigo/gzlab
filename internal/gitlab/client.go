@@ -19,7 +19,16 @@ type ListMergeRequestsOptions struct {
 	SourceBranch string
 }
 
-// Client is gitlab-tui's own view of the GitLab API, scoped to what the
+// ListCommitsOptions filters commits returned by ListCommits.
+type ListCommitsOptions struct {
+	// Author filters by commit author name/email substring match.
+	Author string
+	// Limit caps how many commits are returned (most-recent-first); 0 means
+	// GitLab's default page size.
+	Limit int
+}
+
+// Client is gzlab's own view of the GitLab API, scoped to what the
 // product needs. It exists so the UI never depends on the upstream SDK
 // directly.
 type Client interface {
@@ -33,6 +42,15 @@ type Client interface {
 
 	// ListMergeRequests lists merge requests for a project.
 	ListMergeRequests(ctx context.Context, projectID int, opts ListMergeRequestsOptions) ([]*MergeRequest, error)
+
+	// ListMyMergeRequests lists merge requests across projects via GitLab's
+	// global endpoint, scoped by opts (created by me / assigned to me / to
+	// review) — the cross-project MR list filters.
+	ListMyMergeRequests(ctx context.Context, opts ListMyMergeRequestsOptions) ([]*MergeRequest, error)
+
+	// Search returns a small mixed set of project, merge request, and branch
+	// matches suitable for interactive navigation.
+	Search(ctx context.Context, opts GlobalSearchOptions) ([]GlobalSearchResult, error)
 
 	// GetMergeRequest fetches full detail (including pipeline status) for a
 	// single merge request.
@@ -50,4 +68,13 @@ type Client interface {
 	// FindMergeRequestForBranch returns the open merge request whose source
 	// branch matches branch, or ErrNotFound if none exists.
 	FindMergeRequestForBranch(ctx context.Context, projectID int, branch string) (*MergeRequest, error)
+
+	// ListCommits lists a project's commits across all branches, most-recent
+	// first, optionally filtered to one author.
+	ListCommits(ctx context.Context, projectID int, opts ListCommitsOptions) ([]Commit, error)
+
+	// ListMyContributionEvents lists the current user's contribution events
+	// (pushes, comments, MR/issue actions) across all projects, most-recent
+	// first — powers the dashboard's activity feed and contribution strip.
+	ListMyContributionEvents(ctx context.Context, opts ListContributionEventsOptions) ([]ContributionEvent, error)
 }

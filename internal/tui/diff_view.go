@@ -2,13 +2,19 @@ package tui
 
 import (
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
-	"github.com/arturoburigo/gitlab-tui/internal/gitlab"
+	"github.com/arturoburigo/gzlab/internal/gitlab"
 )
+
+// diffSideBySideMinWidth is the diff-content budget (not terminal width)
+// below which side-by-side columns get too narrow to be useful.
+const diffSideBySideMinWidth = 100
 
 type diffState struct {
 	files      []diffFile
@@ -27,9 +33,61 @@ type diffFile struct {
 	path      string
 	flags     []string
 	lines     []string
+	lineNums  []diffLineNum
 	hunks     []diffHunk
 	additions int
 	deletions int
+}
+
+// diffLineNum is the old/new source line number a rendered diff row maps to;
+// zero means "no number for this row" (a header or metadata line).
+type diffLineNum struct {
+	old, new int
+}
+
+var hunkHeaderPattern = regexp.MustCompile(`^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@`)
+
+// computeLineNumbers walks a file's rendered lines, tracking the old/new
+// counters a unified diff implies, so each row can carry a line-number
+// gutter — the only positional cue today is the raw "@@" header text.
+func computeLineNumbers(lines []string) []diffLineNum {
+	nums := make([]diffLineNum, len(lines))
+	var old, new int
+	for i, line := range lines {
+		switch {
+		case strings.HasPrefix(line, "@@"):
+			if m := hunkHeaderPattern.FindStringSubmatch(line); m != nil {
+				old, _ = strconv.Atoi(m[1])
+				new, _ = strconv.Atoi(m[2])
+			}
+		case isDiffMetadataLine(line):
+		case isDiffAddition(line):
+			nums[i] = diffLineNum{new: new}
+			new++
+		case isDiffRemoval(line):
+			nums[i] = diffLineNum{old: old}
+			old++
+		default:
+			nums[i] = diffLineNum{old: old, new: new}
+			old++
+			new++
+		}
+	}
+	return nums
+}
+
+// diffGutter renders a fixed-width dim "old new " line-number prefix, blank
+// for rows with no number (headers/metadata).
+func diffGutter(n diffLineNum) string {
+	oldCol := "    "
+	if n.old > 0 {
+		oldCol = fmt.Sprintf("%4d", n.old)
+	}
+	newCol := "    "
+	if n.new > 0 {
+		newCol = fmt.Sprintf("%4d", n.new)
+	}
+	return footerStyle.Render(oldCol + " " + newCol + " ")
 }
 
 func (f diffFile) isDeleted() bool {
@@ -127,6 +185,12 @@ func diffFileFromGitLabDiff(diff *gitlab.MergeRequestDiff) diffFile {
 	return file
 }
 
+// maxDiffFileLines caps how many lines of a single file's diff are kept for
+// display — the large-diff fallback (Épico 13). Without it, a generated
+// lockfile or minified bundle changing thousands of lines makes the viewer
+// unusably slow to scroll and search.
+const maxDiffFileLines = 4000
+
 func finalizeDiffFile(file *diffFile) {
 	if file.path == "" {
 		file.path = firstNonEmpty(file.newPath, file.oldPath, "diff")
@@ -146,6 +210,30 @@ func finalizeDiffFile(file *diffFile) {
 			file.deletions++
 		}
 	}
+	file.lineNums = computeLineNumbers(file.lines)
+	truncateDiffFile(file)
+}
+
+// truncateDiffFile trims file.lines/hunks to maxDiffFileLines for display.
+// additions/deletions above are already computed from the full diff, so the
+// file-list stats stay accurate; only rendering and hunk navigation shrink.
+func truncateDiffFile(file *diffFile) {
+	if len(file.lines) <= maxDiffFileLines {
+		return
+	}
+	total := len(file.lines)
+	file.lines = append(file.lines[:maxDiffFileLines:maxDiffFileLines],
+		fmt.Sprintf("… diff truncated: showing %d of %d lines; press 'o' to open the full file in the browser …", maxDiffFileLines, total))
+	file.lineNums = append(file.lineNums[:maxDiffFileLines:maxDiffFileLines], diffLineNum{})
+	file.flags = appendUnique(file.flags, "truncated")
+
+	kept := file.hunks[:0]
+	for _, h := range file.hunks {
+		if h.lineIndex < maxDiffFileLines {
+			kept = append(kept, h)
+		}
+	}
+	file.hunks = kept
 }
 
 func applyDiffMetadata(file *diffFile, line string) {
@@ -182,6 +270,11 @@ func appendUnique(items []string, value string) []string {
 }
 
 func splitDiffLines(raw string) []string {
+	// Expand tabs before any width math runs: lipgloss.Width counts a tab as
+	// 0 columns while every terminal renders it 4+ wide, so clamping/padding
+	// against unexpanded tabs undercounts every indented line (Go diffs are
+	// full of them) and the pane grows a stair-stepped extra row per line.
+	raw = strings.ReplaceAll(raw, "\t", "    ")
 	raw = strings.TrimRight(raw, "\n")
 	if raw == "" {
 		return nil
@@ -254,44 +347,73 @@ func (m Model) renderDiff() string {
 	if bodyHeight < 3 {
 		bodyHeight = 3
 	}
-	sidebarWidth := min(34, max(18, m.width/4))
-	diffWidth := max(30, m.width-sidebarWidth-10)
+	sidebarWidth := m.diffSidebarWidth()
+	// Budget from the frame's real content width, not m.width directly —
+	// the nav sidebar + pane borders/padding already eat ~24-25 columns that
+	// the old "m.width-10" guess didn't account for, so long lines used to
+	// overshoot the pane and get byte-truncated with ANSI-bleed artifacts.
+	gutter := 0
+	if sidebarWidth > 0 {
+		gutter = 2
+	}
+	diffWidth := max(30, m.contentWidth()-sidebarWidth-gutter)
+	sideBySideEngaged := m.diffSideBySide && diffWidth >= diffSideBySideMinWidth
 
 	title := "Diff"
 	if m.detail != nil {
 		title = fmt.Sprintf("Diff !%d - %s", m.detail.IID, m.detail.Title)
 	}
-	if m.diffSideBySide {
+	switch {
+	case sideBySideEngaged:
 		title += "  " + footerStyle.Render("[side-by-side]")
+	case m.diffSideBySide:
+		title += "  " + footerStyle.Render("[side-by-side: widen terminal]")
 	}
 	if m.diffHideWhitespace {
 		title += "  " + footerStyle.Render("[whitespace hidden]")
 	}
 	header := titleStyle.Render(title) + "\n"
-	header += ruleStyle.Render(strings.Repeat("─", 72)) + "\n"
-	sidebar := m.renderDiffFiles(sidebarWidth, bodyHeight)
+	header += rule(m.contentWidth()) + "\n"
 	var content string
-	if m.diffSideBySide {
+	if sideBySideEngaged {
 		content = m.renderCurrentDiffFileSideBySide(diffWidth, bodyHeight)
 	} else {
 		content = m.renderCurrentDiffFile(diffWidth, bodyHeight)
 	}
+	if sidebarWidth == 0 {
+		return header + content
+	}
+	sidebar := m.renderDiffFiles(sidebarWidth, bodyHeight)
 	return header + lipgloss.JoinHorizontal(lipgloss.Top, sidebar, "  ", content)
+}
+
+func (m Model) diffSidebarWidth() int {
+	if len(m.diff.files) <= 1 {
+		return 0
+	}
+	return min(34, max(18, m.width/5))
 }
 
 func (m Model) renderDiffFiles(width, height int) string {
 	lines := make([]string, 0, len(m.diff.files)+2)
 	lines = append(lines, tableHead.Render("Files"))
 	for i, file := range m.diff.files {
-		prefix := "  "
-		style := valueStyle
-		if i == m.diff.fileCursor {
-			prefix = "> "
-			style = selectedStyle
+		prefix := emptyMarker
+		selected := i == m.diff.fileCursor
+		if selected {
+			prefix = cursorMarker
 		}
-		stats := fmt.Sprintf("+%d -%d", file.additions, file.deletions)
-		line := spread(prefix+truncate(file.path, max(8, width-12)), stats, width)
-		lines = append(lines, style.Render(line))
+		path := prefix + truncatePathLeft(file.path, max(8, width-12))
+		if selected {
+			// A selected row is a single inverse-video style applied once;
+			// nesting the addition/deletion colors inside it would let their
+			// own reset codes cut the selection background short mid-line.
+			stats := fmt.Sprintf("+%d -%d", file.additions, file.deletions)
+			lines = append(lines, selectedStyle.Render(spread(path, stats, width)))
+			continue
+		}
+		stats := additionStyle.Render(fmt.Sprintf("+%d", file.additions)) + " " + deletionStyle.Render(fmt.Sprintf("-%d", file.deletions))
+		lines = append(lines, spread(valueStyle.Render(path), stats, width))
 	}
 	if len(m.diff.files) == 0 {
 		lines = append(lines, footerStyle.Render("No files changed."))
@@ -316,8 +438,13 @@ func (m Model) renderCurrentDiffFile(width, height int) string {
 	var b strings.Builder
 	b.WriteString(diffFileTitle(*file) + "\n")
 	for lineIndex, line := range lines[start:end] {
-		active := m.diff.isActiveMatch(m.diff.fileCursor, start+lineIndex)
-		b.WriteString(renderDiffLine(line, m.diffHideWhitespace, active) + "\n")
+		idx := start + lineIndex
+		active := m.diff.isActiveMatch(m.diff.fileCursor, idx)
+		gutter := ""
+		if idx < len(file.lineNums) {
+			gutter = diffGutter(file.lineNums[idx])
+		}
+		b.WriteString(gutter + renderDiffLine(line, m.diffHideWhitespace, active, m.diff.searchQuery) + "\n")
 	}
 	return clampBlock(b.String(), width, height)
 }
@@ -326,6 +453,7 @@ func (m Model) renderCurrentDiffFile(width, height int) string {
 type sideBySideRow struct {
 	left  string
 	right string
+	span  string
 }
 
 // buildSideBySideRows pairs up a unified diff's line-level removal/addition
@@ -339,6 +467,11 @@ func buildSideBySideRows(lines []string) []sideBySideRow {
 	i := 0
 	for i < len(lines) {
 		switch {
+		case isDiffMetadataLine(lines[i]):
+			i++
+		case strings.HasPrefix(lines[i], "@@"):
+			rows = append(rows, sideBySideRow{span: lines[i]})
+			i++
 		case isDiffRemoval(lines[i]):
 			var removals, additions []string
 			for i < len(lines) && isDiffRemoval(lines[i]) {
@@ -379,6 +512,25 @@ func isDiffAddition(line string) bool {
 	return strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "+++")
 }
 
+func isDiffMetadataLine(line string) bool {
+	for _, prefix := range []string{
+		"diff --git ",
+		"index ",
+		"--- ",
+		"+++ ",
+		"new file mode ",
+		"deleted file mode ",
+		"similarity index ",
+		"rename from ",
+		"rename to ",
+	} {
+		if strings.HasPrefix(line, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // renderCurrentDiffFileSideBySide reuses m.diff.lineOffset as an approximate
 // row offset: it isn't a pixel-exact mapping (paired rows can outnumber or
 // undernumber the original lines when a hunk's +/- counts differ), but
@@ -397,21 +549,34 @@ func (m Model) renderCurrentDiffFileSideBySide(width, height int) string {
 
 	start := min(m.diff.lineOffset, max(0, len(rows)-1))
 	end := min(start+height-2, len(rows))
-	colWidth := max(10, (width-3)/2)
+	colWidth := max(10, (width-5)/2)
 
 	var b strings.Builder
 	b.WriteString(diffFileTitle(*file) + "\n")
+	b.WriteString(m.sideBySideHeader(*file, colWidth) + "\n")
 	for _, row := range rows[start:end] {
+		if row.span != "" {
+			b.WriteString(clampStyledLine(hunkStyle.Render(row.span), width) + "\n")
+			continue
+		}
 		left := m.sideBySideCell(row.left, colWidth)
 		right := m.sideBySideCell(row.right, colWidth)
-		b.WriteString(left + " │ " + right + "\n")
+		b.WriteString(left + ruleStyle.Render(" │ ") + right + "\n")
 	}
 	return clampBlock(b.String(), width, height)
 }
 
+func (m Model) sideBySideHeader(file diffFile, colWidth int) string {
+	oldName := firstNonEmpty(file.oldPath, file.path, "old")
+	newName := firstNonEmpty(file.newPath, file.path, "new")
+	left := tableHead.Render(fitDiffCell("OLD  "+oldName, colWidth))
+	right := tableHead.Render(fitDiffCell("NEW  "+newName, colWidth))
+	return left + ruleStyle.Render(" │ ") + right
+}
+
 func (m Model) sideBySideCell(raw string, colWidth int) string {
 	truncated := raw
-	if len(truncated) > colWidth {
+	if lipgloss.Width(truncated) > colWidth {
 		truncated = truncate(truncated, colWidth)
 	}
 	styled := renderSideBySideCell(truncated, m.diffHideWhitespace)
@@ -419,6 +584,38 @@ func (m Model) sideBySideCell(raw string, colWidth int) string {
 		styled += strings.Repeat(" ", pad)
 	}
 	return styled
+}
+
+// truncatePathLeft truncates from the left, keeping the tail — the basename,
+// the part that actually distinguishes files in the same package — intact
+// instead of cutting it off in favor of a shared parent directory prefix.
+func truncatePathLeft(path string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	w := lipgloss.Width(path)
+	if w <= width {
+		return path
+	}
+	return ansi.TruncateLeft(path, w-width+1, "…")
+}
+
+func clampStyledLine(line string, width int) string {
+	if lipgloss.Width(line) <= width {
+		return line
+	}
+	return truncate(line, max(1, width))
+}
+
+func fitDiffCell(s string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	s = truncate(s, width)
+	if pad := width - lipgloss.Width(s); pad > 0 {
+		s += strings.Repeat(" ", pad)
+	}
+	return s
 }
 
 func renderSideBySideCell(line string, hideWhitespace bool) string {
@@ -465,6 +662,8 @@ func (m Model) diffHints() []hint {
 		{"e", "editor"},
 		{"w", "whitespace"},
 		{"s", "side-by-side"},
+		{"y", "copy line"},
+		{"Y", "copy hunk"},
 		{"g/G", "top/end"},
 		{"r", "refresh"},
 		{"esc", "back"},
@@ -480,28 +679,47 @@ func (m Model) diffLines() []string {
 	return file.lines
 }
 
-func renderDiffLine(line string, hideWhitespace, activeMatch bool) string {
+// renderDiffLine styles line for the unified view. When query is non-empty
+// and matches, only the matched span is highlighted (active gets the full
+// search style, other matches a dimmer one) instead of the whole line being
+// painted over — with N visible matches, "Match 3/17" used to give no
+// on-screen way to tell which of the other N-1 was which.
+func renderDiffLine(line string, hideWhitespace, activeMatch bool, query string) string {
 	if hideWhitespace && isWhitespaceOnlyDiffLine(line) {
 		return footerStyle.Render(string(line[0]) + " (whitespace only)")
 	}
-	if activeMatch {
-		return searchStyle.Render(line)
+	if query == "" {
+		return styleDiffLineContent(line)
 	}
-	return styleDiffLineContent(line)
+	idx := strings.Index(strings.ToLower(line), strings.ToLower(query))
+	if idx < 0 {
+		return styleDiffLineContent(line)
+	}
+	base := lineContentStyle(line)
+	matchStyle := searchDimStyle
+	if activeMatch {
+		matchStyle = searchStyle
+	}
+	before, match, after := line[:idx], line[idx:idx+len(query)], line[idx+len(query):]
+	return base.Render(before) + matchStyle.Render(match) + base.Render(after)
 }
 
 func styleDiffLineContent(line string) string {
+	return lineContentStyle(line).Render(line)
+}
+
+func lineContentStyle(line string) lipgloss.Style {
 	switch {
 	case strings.HasPrefix(line, "diff --"):
-		return selectedStyle.Render(line)
+		return selectedStyle
 	case strings.HasPrefix(line, "@@"):
-		return hunkStyle.Render(line)
+		return hunkStyle
 	case strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "+++"):
-		return additionStyle.Render(line)
+		return additionStyle
 	case strings.HasPrefix(line, "-") && !strings.HasPrefix(line, "---"):
-		return deletionStyle.Render(line)
+		return deletionStyle
 	default:
-		return line
+		return lipgloss.NewStyle()
 	}
 }
 
@@ -640,6 +858,41 @@ func (d *diffState) maxLineOffset(height int) int {
 		return 0
 	}
 	return max(0, len(file.lines)-max(1, height-4))
+}
+
+// currentLineText is what 'y' copies: the active search match in the
+// current file if one is selected, else the line at the top of the viewport.
+func (d diffState) currentLineText() string {
+	file := d.currentFile()
+	if file == nil {
+		return ""
+	}
+	if len(d.searchMatches) > 0 && d.searchCursor >= 0 && d.searchCursor < len(d.searchMatches) {
+		match := d.searchMatches[d.searchCursor]
+		if match.fileIndex == d.fileCursor && match.lineIndex >= 0 && match.lineIndex < len(file.lines) {
+			return file.lines[match.lineIndex]
+		}
+	}
+	if d.lineOffset >= 0 && d.lineOffset < len(file.lines) {
+		return file.lines[d.lineOffset]
+	}
+	return ""
+}
+
+// currentHunkText is what 'Y' copies: the full text of the hunk currently in
+// view (from its "@@ ... @@" header to the next hunk or end of file).
+func (d diffState) currentHunkText() string {
+	file := d.currentFile()
+	if file == nil || len(file.hunks) == 0 {
+		return ""
+	}
+	idx := min(max(d.hunkCursor, 0), len(file.hunks)-1)
+	start := file.hunks[idx].lineIndex
+	end := len(file.lines)
+	if idx+1 < len(file.hunks) {
+		end = file.hunks[idx+1].lineIndex
+	}
+	return strings.Join(file.lines[start:end], "\n")
 }
 
 func (d *diffState) syncHunkCursor() {

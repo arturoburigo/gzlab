@@ -1,11 +1,11 @@
-// Command gitlab-tui is the entrypoint for the GitLab TUI.
+// Command gzlab is the entrypoint for the GitLab TUI.
 package main
 
 import (
 	"fmt"
 	"os"
 
-	"github.com/arturoburigo/gitlab-tui/internal/cli"
+	"github.com/arturoburigo/gzlab/internal/cli"
 )
 
 func main() {

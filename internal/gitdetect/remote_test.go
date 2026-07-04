@@ -18,15 +18,15 @@ func TestParseRemoteURL(t *testing.T) {
 		},
 		{
 			name:     "https with .git suffix",
-			remote:   "https://gitlab.com/arturoburigo/gitlab-tui.git",
+			remote:   "https://gitlab.com/arturoburigo/gzlab.git",
 			wantHost: "https://gitlab.com",
-			wantPath: "arturoburigo/gitlab-tui",
+			wantPath: "arturoburigo/gzlab",
 		},
 		{
 			name:     "https without .git suffix",
-			remote:   "https://gitlab.com/arturoburigo/gitlab-tui",
+			remote:   "https://gitlab.com/arturoburigo/gzlab",
 			wantHost: "https://gitlab.com",
-			wantPath: "arturoburigo/gitlab-tui",
+			wantPath: "arturoburigo/gzlab",
 		},
 		{
 			name:     "ssh:// with explicit port is dropped (SSH port, not the API port)",

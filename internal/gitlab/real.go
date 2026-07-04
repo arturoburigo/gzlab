@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	gl "gitlab.com/gitlab-org/api/client-go"
 )
@@ -73,6 +74,206 @@ func (c *realClient) ListMergeRequests(ctx context.Context, projectID int, opts 
 		if resp == nil || resp.NextPage == 0 {
 			break
 		}
+	}
+	return result, nil
+}
+
+func (c *realClient) ListMyMergeRequests(ctx context.Context, opts ListMyMergeRequestsOptions) ([]*MergeRequest, error) {
+	state := string(opts.State)
+	if state == "" {
+		state = string(MergeRequestStateOpened)
+	}
+
+	perPage := 100
+	if opts.Limit > 0 && opts.Limit < perPage {
+		perPage = opts.Limit
+	}
+	listOpts := &gl.ListMergeRequestsOptions{
+		ListOptions: gl.ListOptions{PerPage: int64(perPage), Page: 1},
+	}
+	if state != string(MergeRequestStateAll) {
+		listOpts.State = &state
+	}
+	if opts.Scope != "" {
+		scope := string(opts.Scope)
+		listOpts.Scope = &scope
+	}
+	if opts.ReviewerUsername != "" {
+		listOpts.ReviewerUsername = &opts.ReviewerUsername
+	}
+
+	var result []*MergeRequest
+	for page := 1; page <= maxMergeRequestPages; page++ {
+		listOpts.Page = int64(page)
+		mrs, resp, err := c.api.MergeRequests.ListMergeRequests(listOpts, gl.WithContext(ctx))
+		if err != nil {
+			return nil, fmt.Errorf("listing merge requests: %w", err)
+		}
+		for _, mr := range mrs {
+			result = append(result, toMergeRequestFromBasic(mr))
+		}
+		if opts.Limit > 0 && len(result) >= opts.Limit {
+			return result[:opts.Limit], nil
+		}
+		if resp == nil || resp.NextPage == 0 {
+			break
+		}
+	}
+	return result, nil
+}
+
+func (c *realClient) ListCommits(ctx context.Context, projectID int, opts ListCommitsOptions) ([]Commit, error) {
+	perPage := opts.Limit
+	if perPage <= 0 || perPage > 100 {
+		perPage = 20
+	}
+	listOpts := &gl.ListCommitsOptions{
+		All:         gl.Ptr(true),
+		ListOptions: gl.ListOptions{PerPage: int64(perPage), Page: 1},
+	}
+	if opts.Author != "" {
+		listOpts.Author = &opts.Author
+	}
+
+	commits, _, err := c.api.Commits.ListCommits(projectID, listOpts, gl.WithContext(ctx))
+	if err != nil {
+		return nil, fmt.Errorf("listing commits for project %d: %w", projectID, err)
+	}
+	result := make([]Commit, 0, len(commits))
+	for _, commit := range commits {
+		result = append(result, toCommit(commit))
+	}
+	return result, nil
+}
+
+// maxContributionEventPages bounds ListMyContributionEvents' pagination —
+// callers scope this to a short window via opts.After, so this is a
+// defensive ceiling, not a real-world limit.
+const maxContributionEventPages = 20
+
+func (c *realClient) ListMyContributionEvents(ctx context.Context, opts ListContributionEventsOptions) ([]ContributionEvent, error) {
+	perPage := 100
+	if opts.Limit > 0 && opts.Limit < perPage {
+		perPage = opts.Limit
+	}
+	listOpts := &gl.ListContributionEventsOptions{
+		ListOptions: gl.ListOptions{PerPage: int64(perPage), Page: 1},
+	}
+	if !opts.After.IsZero() {
+		after := gl.ISOTime(opts.After)
+		listOpts.After = &after
+	}
+
+	var result []ContributionEvent
+	for page := 1; page <= maxContributionEventPages; page++ {
+		listOpts.Page = int64(page)
+		events, resp, err := c.api.Events.ListCurrentUserContributionEvents(listOpts, gl.WithContext(ctx))
+		if err != nil {
+			return nil, fmt.Errorf("listing contribution events: %w", err)
+		}
+		for _, e := range events {
+			result = append(result, toContributionEvent(e))
+		}
+		if opts.Limit > 0 && len(result) >= opts.Limit {
+			return result[:opts.Limit], nil
+		}
+		if resp == nil || resp.NextPage == 0 {
+			break
+		}
+	}
+	return result, nil
+}
+
+func (c *realClient) Search(ctx context.Context, opts GlobalSearchOptions) ([]GlobalSearchResult, error) {
+	query := strings.TrimSpace(opts.Query)
+	if query == "" {
+		return nil, nil
+	}
+	limit := opts.Limit
+	if limit <= 0 {
+		limit = 20
+	}
+
+	results := make([]GlobalSearchResult, 0, limit)
+	projects, err := c.searchProjects(ctx, query, limit)
+	if err != nil {
+		return nil, err
+	}
+	for _, project := range projects {
+		results = append(results, GlobalSearchResult{Type: "project", Project: project})
+		if len(results) >= limit {
+			return results, nil
+		}
+	}
+
+	mrs, err := c.searchMergeRequests(ctx, query, limit)
+	if err != nil {
+		return nil, err
+	}
+	for _, mr := range mrs {
+		results = append(results, GlobalSearchResult{Type: "merge_request", MR: mr})
+		if len(results) >= limit {
+			return results, nil
+		}
+	}
+
+	branchProjects := projects
+	if opts.Project != nil {
+		branchProjects = []*Project{opts.Project}
+	}
+	for _, project := range branchProjects {
+		branches, err := c.searchBranches(ctx, project.ID, query, limit)
+		if err != nil {
+			continue
+		}
+		for _, branch := range branches {
+			results = append(results, GlobalSearchResult{Type: "branch", Project: project, Branch: branch})
+			if len(results) >= limit {
+				return results, nil
+			}
+		}
+	}
+	return results, nil
+}
+
+func (c *realClient) searchProjects(ctx context.Context, query string, limit int) ([]*Project, error) {
+	opt := &gl.SearchOptions{ListOptions: gl.ListOptions{PerPage: int64(limit), Page: 1}}
+	projects, _, err := c.api.Search.Projects(query, opt, gl.WithContext(ctx))
+	if err != nil {
+		return nil, fmt.Errorf("searching projects: %w", err)
+	}
+	result := make([]*Project, 0, len(projects))
+	for _, project := range projects {
+		result = append(result, toProject(project))
+	}
+	return result, nil
+}
+
+func (c *realClient) searchMergeRequests(ctx context.Context, query string, limit int) ([]*MergeRequest, error) {
+	opt := &gl.SearchOptions{ListOptions: gl.ListOptions{PerPage: int64(limit), Page: 1}}
+	mrs, _, err := c.api.Search.MergeRequests(query, opt, gl.WithContext(ctx))
+	if err != nil {
+		return nil, fmt.Errorf("searching merge requests: %w", err)
+	}
+	result := make([]*MergeRequest, 0, len(mrs))
+	for _, mr := range mrs {
+		result = append(result, toMergeRequest(mr))
+	}
+	return result, nil
+}
+
+func (c *realClient) searchBranches(ctx context.Context, projectID int, query string, limit int) ([]*Branch, error) {
+	opt := &gl.ListBranchesOptions{
+		Search:      gl.Ptr(query),
+		ListOptions: gl.ListOptions{PerPage: int64(limit), Page: 1},
+	}
+	branches, _, err := c.api.Branches.ListBranches(projectID, opt, gl.WithContext(ctx))
+	if err != nil {
+		return nil, fmt.Errorf("searching branches for project %d: %w", projectID, err)
+	}
+	result := make([]*Branch, 0, len(branches))
+	for _, branch := range branches {
+		result = append(result, toBranch(branch))
 	}
 	return result, nil
 }

@@ -493,8 +493,8 @@ Permitir alternar entre GitLab empresarial e pessoal.
 ### Exemplo de uso
 
 ```bash
-gitlab-tui --profile empresa
-gitlab-tui --profile pessoal
+gzlab --profile empresa
+gzlab --profile pessoal
 ```
 
 ---
@@ -1293,15 +1293,15 @@ Permitir algumas ações sem abrir o TUI.
 ### Comandos iniciais
 
 ```bash
-gitlab-tui
-gitlab-tui auth login
-gitlab-tui auth status
-gitlab-tui profile list
-gitlab-tui mr list
-gitlab-tui mr view 250
-gitlab-tui mr checkout 250
-gitlab-tui pipeline list
-gitlab-tui pipeline logs <job-id>
+gzlab
+gzlab auth login
+gzlab auth status
+gzlab profile list
+gzlab mr list
+gzlab mr view 250
+gzlab mr checkout 250
+gzlab pipeline list
+gzlab pipeline logs <job-id>
 ```
 
 ### Tasks

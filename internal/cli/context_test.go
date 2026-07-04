@@ -4,7 +4,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/arturoburigo/gitlab-tui/internal/config"
+	"github.com/arturoburigo/gzlab/internal/config"
 )
 
 func TestResolveProfileName(t *testing.T) {

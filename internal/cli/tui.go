@@ -7,10 +7,11 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
 
-	"github.com/arturoburigo/gitlab-tui/internal/config"
-	"github.com/arturoburigo/gitlab-tui/internal/gitdetect"
-	"github.com/arturoburigo/gitlab-tui/internal/history"
-	"github.com/arturoburigo/gitlab-tui/internal/tui"
+	"github.com/arturoburigo/gzlab/internal/config"
+	"github.com/arturoburigo/gzlab/internal/gitdetect"
+	"github.com/arturoburigo/gzlab/internal/history"
+	"github.com/arturoburigo/gzlab/internal/tui"
+	"github.com/arturoburigo/gzlab/internal/workspace"
 )
 
 func runTUI(cmd *cobra.Command, args []string) error {
@@ -21,7 +22,7 @@ func runTUI(cmd *cobra.Command, args []string) error {
 
 	repoRoot, err := gitdetect.RepoRoot(dir)
 	if err != nil {
-		return fmt.Errorf("gitlab-tui must be run inside a git repository: %w", err)
+		return fmt.Errorf("gzlab must be run inside a git repository: %w", err)
 	}
 
 	originURL, err := gitdetect.OriginURL(repoRoot)
@@ -51,17 +52,26 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	workspacePath, err := workspace.DefaultPath()
+	if err != nil {
+		return err
+	}
 
 	deps := tui.Deps{
 		Config:          cfg,
-		NewClient:       newClientForProfile,
+		NewClient:       newClientForProfileWithCache(cfg),
 		Remote:          remote,
 		RepoRoot:        repoRoot,
 		Branch:          branch,
 		ProfileOverride: profileFlag,
 		HistoryPath:     historyPath,
+		WorkspacePath:   workspacePath,
 	}
 
-	_, err = tea.NewProgram(tui.New(deps), tea.WithAltScreen()).Run()
+	opts := []tea.ProgramOption{tea.WithAltScreen()}
+	if cfg.UI.Mouse {
+		opts = append(opts, tea.WithMouseCellMotion())
+	}
+	_, err = tea.NewProgram(tui.New(deps), opts...).Run()
 	return err
 }

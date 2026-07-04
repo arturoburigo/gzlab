@@ -2,10 +2,13 @@ package cli
 
 import (
 	"bytes"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
-	"github.com/arturoburigo/gitlab-tui/internal/config"
+	localcache "github.com/arturoburigo/gzlab/internal/cache"
+	"github.com/arturoburigo/gzlab/internal/config"
 )
 
 // withIsolatedHome points $HOME at a fresh temp dir for the duration of the
@@ -120,5 +123,25 @@ func TestVersionCommand(t *testing.T) {
 	}
 	if out == "" {
 		t.Error("version command produced no output")
+	}
+}
+
+func TestCacheClear(t *testing.T) {
+	home := withIsolatedHome(t)
+	root := filepath.Join(home, ".cache", "gitlab-tui")
+	store := localcache.NewStore(root)
+	if err := store.Set("x", 1, "cached"); err != nil {
+		t.Fatalf("Set() error = %v", err)
+	}
+
+	out, err := runCommand(t, "cache", "clear")
+	if err != nil {
+		t.Fatalf("cache clear error = %v", err)
+	}
+	if !strings.Contains(out, root) {
+		t.Fatalf("cache clear output %q does not mention %q", out, root)
+	}
+	if _, err := os.Stat(root); !os.IsNotExist(err) {
+		t.Fatalf("cache dir stat error = %v, want not exist", err)
 	}
 }

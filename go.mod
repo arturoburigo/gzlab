@@ -1,4 +1,4 @@
-module github.com/arturoburigo/gitlab-tui
+module github.com/arturoburigo/gzlab
 
 go 1.25.7
 

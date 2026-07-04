@@ -11,7 +11,7 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
-	"github.com/arturoburigo/gitlab-tui/internal/config"
+	"github.com/arturoburigo/gzlab/internal/config"
 )
 
 func newAuthCommand() *cobra.Command {
@@ -29,11 +29,16 @@ func newAuthLoginCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:   "login",
 		Short: "Authenticate against a GitLab instance and save a profile",
-		RunE:  runAuthLogin,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return createProfile(cmd, "")
+		},
 	}
 }
 
-func runAuthLogin(cmd *cobra.Command, args []string) error {
+// createProfile runs the interactive "authenticate + save a profile" flow
+// shared by `auth login` and `profile add`. When presetName is non-empty
+// (profile add <name>) the name prompt is skipped.
+func createProfile(cmd *cobra.Command, presetName string) error {
 	out := cmd.OutOrStdout()
 	reader := bufio.NewReader(cmd.InOrStdin())
 
@@ -45,9 +50,12 @@ func runAuthLogin(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("host is required")
 	}
 
-	name, err := promptLine(out, reader, "Profile name (e.g. empresa): ")
-	if err != nil {
-		return err
+	name := presetName
+	if name == "" {
+		name, err = promptLine(out, reader, "Profile name (e.g. empresa): ")
+		if err != nil {
+			return err
+		}
 	}
 	if name == "" {
 		return fmt.Errorf("profile name is required")

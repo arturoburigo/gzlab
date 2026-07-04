@@ -3,7 +3,7 @@ package config
 import (
 	"fmt"
 
-	"github.com/arturoburigo/gitlab-tui/internal/gitdetect"
+	"github.com/arturoburigo/gzlab/internal/gitdetect"
 )
 
 // Validate checks the config for internally-consistent, actionable errors.

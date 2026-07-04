@@ -5,8 +5,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/arturoburigo/gitlab-tui/internal/config"
-	"github.com/arturoburigo/gitlab-tui/internal/gitlab"
+	localcache "github.com/arturoburigo/gzlab/internal/cache"
+	"github.com/arturoburigo/gzlab/internal/config"
+	"github.com/arturoburigo/gzlab/internal/gitlab"
 )
 
 const apiTimeout = 15 * time.Second
@@ -20,7 +21,7 @@ func resolveProfileName(cfg *config.Config) (string, error) {
 	if cfg.DefaultProfile != "" {
 		return cfg.DefaultProfile, nil
 	}
-	return "", fmt.Errorf("no profile specified: pass --profile or set a default_profile (run `gitlab-tui auth login`)")
+	return "", fmt.Errorf("no profile specified: pass --profile or set a default_profile (run `gzlab auth login`)")
 }
 
 // loadActiveProfile loads the config file and resolves the profile to use
@@ -52,6 +53,39 @@ func newClientForProfile(p config.Profile) (gitlab.Client, error) {
 		return nil, fmt.Errorf("resolving token: %w", err)
 	}
 	return gitlab.NewClient(p.Host, token)
+}
+
+func newClientForProfileWithCache(cfg *config.Config) func(config.Profile) (gitlab.Client, error) {
+	return func(p config.Profile) (gitlab.Client, error) {
+		client, err := newClientForProfile(p)
+		if err != nil {
+			return nil, err
+		}
+		if cfg == nil || !cfg.Cache.Enabled {
+			return client, nil
+		}
+		path, err := localcache.DefaultPath()
+		if err != nil {
+			return nil, err
+		}
+		namespace := p.Host + "|" + p.TokenEnv
+		return localcache.NewClient(client, localcache.NewStore(path), namespace, cacheTTLs(cfg.Cache.TTL)), nil
+	}
+}
+
+// cacheTTLs converts the config's per-type TTL settings into localcache.TTLs.
+func cacheTTLs(t config.CacheTTLConfig) localcache.TTLs {
+	return localcache.TTLs{
+		CurrentUser:        time.Duration(t.CurrentUser),
+		Project:            time.Duration(t.Project),
+		MergeRequestList:   time.Duration(t.MergeRequestList),
+		MergeRequestDetail: time.Duration(t.MergeRequestDetail),
+		Diff:               time.Duration(t.Diff),
+		Pipeline:           time.Duration(t.Pipeline),
+		PipelineJobs:       time.Duration(t.PipelineJobs),
+		Commits:            time.Duration(t.Commits),
+		ContributionEvents: time.Duration(t.ContributionEvents),
+	}
 }
 
 func withAPITimeout(ctx context.Context) (context.Context, context.CancelFunc) {

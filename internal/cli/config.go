@@ -9,13 +9,13 @@ import (
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 
-	"github.com/arturoburigo/gitlab-tui/internal/config"
+	"github.com/arturoburigo/gzlab/internal/config"
 )
 
 func newConfigCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "config",
-		Short: "Inspect and edit the gitlab-tui config file",
+		Short: "Inspect and edit the gzlab config file",
 	}
 	cmd.AddCommand(newConfigShowCommand())
 	cmd.AddCommand(newConfigEditCommand())

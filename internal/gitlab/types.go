@@ -9,13 +9,21 @@ type User struct {
 	Name     string
 }
 
-// Project is a GitLab project relevant to gitlab-tui.
+// Project is a GitLab project relevant to gzlab.
 type Project struct {
 	ID                int
 	PathWithNamespace string
 	Name              string
 	WebURL            string
 	DefaultBranch     string
+}
+
+// Branch is a repository branch returned by GitLab.
+type Branch struct {
+	Name      string
+	WebURL    string
+	Protected bool
+	Default   bool
 }
 
 // MergeRequestState mirrors GitLab's merge request state values.
@@ -25,12 +33,17 @@ const (
 	MergeRequestStateOpened MergeRequestState = "opened"
 	MergeRequestStateClosed MergeRequestState = "closed"
 	MergeRequestStateMerged MergeRequestState = "merged"
+	// MergeRequestStateAll requests every state instead of GitLab's default
+	// of "opened" — for callers that want a full state breakdown (e.g. the
+	// dashboard's merge-request stats card).
+	MergeRequestStateAll MergeRequestState = "all"
 )
 
 // MergeRequest is a trimmed-down view of a GitLab merge request.
 type MergeRequest struct {
 	IID          int
 	ProjectID    int
+	ProjectPath  string // "namespace/project"; only populated by cross-project listings (ListMyMergeRequests)
 	Title        string
 	State        MergeRequestState
 	Draft        bool
@@ -39,6 +52,8 @@ type MergeRequest struct {
 	Author       string
 	WebURL       string
 	HasConflicts bool
+	Labels       []string
+	Description  string
 
 	ApprovalsRequired int
 	ApprovalsGiven    int
@@ -49,6 +64,49 @@ type MergeRequest struct {
 
 	CreatedAt time.Time
 	UpdatedAt time.Time
+}
+
+// MergeRequestsScope selects which merge requests ListMyMergeRequests returns,
+// mirroring GitLab's global /merge_requests "scope" values.
+type MergeRequestsScope string
+
+const (
+	// MergeRequestsScopeCreatedByMe returns MRs authored by the token's user.
+	MergeRequestsScopeCreatedByMe MergeRequestsScope = "created_by_me"
+	// MergeRequestsScopeAssignedToMe returns MRs assigned to the token's user.
+	MergeRequestsScopeAssignedToMe MergeRequestsScope = "assigned_to_me"
+)
+
+// ListMyMergeRequestsOptions filters MRs returned by ListMyMergeRequests,
+// GitLab's global (cross-project) merge requests endpoint.
+type ListMyMergeRequestsOptions struct {
+	// State defaults to MergeRequestStateOpened when empty.
+	State MergeRequestState
+	// Scope selects created-by-me/assigned-to-me. Leave empty together with
+	// ReviewerUsername set to list MRs where the user is a reviewer.
+	Scope MergeRequestsScope
+	// ReviewerUsername, when set, restricts results to MRs where that user
+	// is a requested reviewer ("MRs para revisar").
+	ReviewerUsername string
+	// Limit, when > 0, fetches a single page of at most this many results
+	// instead of paginating through everything — for callers that want a
+	// recent snapshot (e.g. a dashboard stat) rather than the full list.
+	Limit int
+}
+
+// GlobalSearchOptions controls the lightweight global search used by the TUI.
+type GlobalSearchOptions struct {
+	Query   string
+	Limit   int
+	Project *Project
+}
+
+// GlobalSearchResult is a project, MR, or branch match.
+type GlobalSearchResult struct {
+	Type    string
+	Project *Project
+	MR      *MergeRequest
+	Branch  *Branch
 }
 
 // Approved reports whether the merge request has enough approvals.
@@ -74,13 +132,17 @@ const (
 
 // Pipeline is a trimmed-down view of a GitLab pipeline.
 type Pipeline struct {
-	ID         int
-	IID        int
-	Status     PipelineStatus
-	Source     string
-	Ref        string
-	SHA        string
-	WebURL     string
+	ID     int
+	IID    int
+	Status PipelineStatus
+	Source string
+	Ref    string
+	SHA    string
+	WebURL string
+	// User is the username of whoever started the pipeline. Only populated
+	// by GetPipeline (the full pipeline screen); GitLab's embedded MR
+	// pipeline summary doesn't include it.
+	User       string
 	CreatedAt  time.Time
 	StartedAt  time.Time
 	FinishedAt time.Time
@@ -109,6 +171,25 @@ type Commit struct {
 	CreatedAt  time.Time
 }
 
+// ContributionEvent is a single action the current user took anywhere in
+// GitLab — pushing, commenting, opening/closing/merging an MR or issue — the
+// data behind the dashboard's activity feed and contribution-activity strip.
+type ContributionEvent struct {
+	Action    string // GitLab's own action_name, e.g. "opened", "commented on", "approved"
+	Target    string // the MR/issue title, or the branch ref for a push
+	CreatedAt time.Time
+}
+
+// ListContributionEventsOptions filters ListMyContributionEvents.
+type ListContributionEventsOptions struct {
+	// After restricts results to events on/after this time; zero means no
+	// lower bound.
+	After time.Time
+	// Limit caps how many events are fetched (most-recent-first); 0 means a
+	// single default page.
+	Limit int
+}
+
 // Note is a single comment within a merge request discussion thread. System
 // notes (System == true) are GitLab's own activity log entries — "changed the
 // description", "added 3 commits", "marked as ready" — not human comments.
@@ -120,6 +201,11 @@ type Note struct {
 	Resolvable bool
 	Resolved   bool
 	CreatedAt  time.Time
+	// PositionPath/PositionLine locate a code-anchored diff comment ("new_path"
+	// / "new_line" in GitLab's position object); PositionLine is 0 for notes
+	// with no position (general MR comments).
+	PositionPath string
+	PositionLine int
 }
 
 // Discussion is a thread of notes on a merge request. A one-note discussion is

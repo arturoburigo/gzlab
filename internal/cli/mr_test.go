@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/arturoburigo/gitlab-tui/internal/gitlab"
+	"github.com/arturoburigo/gzlab/internal/gitlab"
 )
 
 func TestPrintMRList(t *testing.T) {

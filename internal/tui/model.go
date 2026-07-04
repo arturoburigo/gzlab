@@ -1,4 +1,4 @@
-// Package tui implements gitlab-tui's Bubble Tea interface: a dashboard
+// Package tui implements gzlab's Bubble Tea interface: a dashboard
 // showing the current branch's merge request, a project MR list, and MR
 // detail — the "Primeira Slice Recomendada" from the product plan.
 package tui
@@ -7,14 +7,15 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/arturoburigo/gitlab-tui/internal/config"
-	"github.com/arturoburigo/gitlab-tui/internal/dashboard"
-	"github.com/arturoburigo/gitlab-tui/internal/gitdetect"
-	"github.com/arturoburigo/gitlab-tui/internal/gitlab"
-	"github.com/arturoburigo/gitlab-tui/internal/history"
+	"github.com/arturoburigo/gzlab/internal/config"
+	"github.com/arturoburigo/gzlab/internal/dashboard"
+	"github.com/arturoburigo/gzlab/internal/gitdetect"
+	"github.com/arturoburigo/gzlab/internal/gitlab"
+	"github.com/arturoburigo/gzlab/internal/history"
 )
 
 type screen int
@@ -28,6 +29,8 @@ const (
 	screenJobLog
 	screenDiscussions
 	screenCommits
+	screenSearch
+	screenWorkspace
 )
 
 // Deps are the pre-resolved local-repo facts and constructors the TUI
@@ -41,6 +44,7 @@ type Deps struct {
 	Branch          string
 	ProfileOverride string
 	HistoryPath     string
+	WorkspacePath   string
 	RunGLab         glabRunner
 }
 
@@ -59,9 +63,34 @@ type Model struct {
 	recentProjects []history.Project
 	recentBranches []history.Branch
 	dashCursor     int
+	navCursor      int
+	navActive      bool
 
-	mrs    []*gitlab.MergeRequest
-	cursor int
+	// dashLoading is the "load as one" gate: true from New/refresh until BOTH
+	// the dashboard context and its best-effort stats have arrived, so the
+	// whole dashboard paints at once behind a spinner instead of popping in
+	// piecemeal. spinnerFrame/spinnerGen drive that spinner; spinnerGen is
+	// bumped on each (re)load so a lingering tick from a finished load is
+	// recognised as stale and stops itself.
+	dashLoading  bool
+	spinnerFrame int
+	spinnerGen   int
+
+	// dashCommits/dashMRs/dashAssignedMRs/dashActivity are the dashboard's
+	// best-effort personal-stats enrichment (recent commits, MR state
+	// breakdown, MRs assigned to the current user, recent cross-project
+	// activity) — nil until dashboardStatsLoadedMsg arrives, and possibly
+	// still empty after (a failed fetch is swallowed, not surfaced as an
+	// error).
+	dashCommits     []gitlab.Commit
+	dashMRs         []*gitlab.MergeRequest
+	dashAssignedMRs []*gitlab.MergeRequest
+	dashActivity    []gitlab.ContributionEvent
+
+	mrs      []*gitlab.MergeRequest
+	cursor   int
+	mrScope  mrScope
+	mrFilter mrQuickFilter
 
 	detail *gitlab.MergeRequest
 
@@ -73,21 +102,43 @@ type Model struct {
 	diffHideWhitespace bool
 	diffSideBySide     bool
 
-	pipeline  *gitlab.Pipeline
-	jobs      []*gitlab.Job
-	jobCursor int
-	jobOffset int
+	pipeline          *gitlab.Pipeline
+	jobs              []*gitlab.Job
+	jobCursor         int
+	jobOffset         int
+	pollGen           int
+	lastPipelineFetch time.Time
 
 	jobLog             logState
 	jobLogSearchActive bool
 	jobLogSearchInput  string
+	jobLogFollowing    bool
+	jobLogPollGen      int
+	lastJobLogFetch    time.Time
 
-	discuss       discussState
-	commentActive bool
-	commentInput  string
+	discuss        discussState
+	commentActive  bool
+	commentInput   string
+	commentReplyID string // empty: new top-level comment; set: replying to that discussion
 
 	commits      []gitlab.Commit
+	commitCursor int
 	commitOffset int
+
+	searchActive  bool
+	searchInput   string
+	searchResults []gitlab.GlobalSearchResult
+	searchCursor  int
+	searchLoading bool
+
+	workspaces      []workspaceView
+	workspaceCursor int
+
+	commandPaletteActive bool
+	commandPaletteInput  string
+	commandPaletteCursor int
+
+	summaryFormat summaryFormat
 
 	showHelp bool
 
@@ -102,32 +153,68 @@ type Model struct {
 // New builds the initial Model for deps. Loading starts once the model is
 // handed to tea.NewProgram, which calls Init() for you.
 func New(deps Deps) Model {
-	return Model{deps: deps, loading: true}
+	if deps.Config != nil {
+		applyTheme(deps.Config.UI.Theme)
+	}
+	return Model{deps: deps, loading: true, dashLoading: true}
 }
 
 func (m Model) Init() tea.Cmd {
-	return loadDashboardCmd(m.deps)
+	return tea.Batch(loadDashboardCmd(m.deps), spinnerTickCmd(m.spinnerGen))
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// A recoverable error (a failed poll, "saving log", ...) shows in the
+	// footer until something succeeds — clearing it only on
+	// dashboardLoadedMsg left it stuck on screen even after a successful
+	// non-dashboard refresh. Any other *Loaded/*Done/tick message means some
+	// async operation just completed, which is the signal to drop it.
+	switch msg.(type) {
+	case errMsg, tea.WindowSizeMsg, tea.MouseMsg, tea.KeyMsg:
+	default:
+		m.err = nil
+	}
+
 	switch msg := msg.(type) {
 	case dashboardLoadedMsg:
 		m.loading = false
-		m.err = nil
 		m.dash = msg.ctx
 		client, err := m.deps.NewClient(msg.ctx.Profile)
 		if err != nil {
 			m.err = err
+			m.dashLoading = false
 			return m, nil
 		}
 		m.client = client
-		return m, recordHistoryCmd(m.deps, msg.ctx)
+		// Keep the spinner up until the stats land too ("load as one"); if
+		// there are none to fetch, reveal the dashboard now instead of hanging
+		// on a message that will never arrive.
+		statsCmd := loadDashboardStatsCmd(m.client, msg.ctx)
+		if statsCmd == nil {
+			m.dashLoading = false
+		}
+		return m, tea.Batch(recordHistoryCmd(m.deps, msg.ctx), statsCmd)
 
 	case historyLoadedMsg:
 		m.recentProjects = msg.projects
 		m.recentBranches = msg.branches
 		m.dashCursor = m.dashMinCursor()
 		return m, nil
+
+	case dashboardStatsLoadedMsg:
+		m.dashLoading = false
+		m.dashCommits = msg.commits
+		m.dashMRs = msg.mrs
+		m.dashAssignedMRs = msg.assignedMRs
+		m.dashActivity = msg.activity
+		return m, nil
+
+	case spinnerTickMsg:
+		if msg.gen != m.spinnerGen || !m.dashLoading {
+			return m, nil
+		}
+		m.spinnerFrame++
+		return m, spinnerTickCmd(m.spinnerGen)
 
 	case mrListLoadedMsg:
 		m.loading = false
@@ -139,6 +226,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loading = false
 		m.detail = msg.mr
 		m.screen = screenDetail
+		m.navActive = false
 		return m, nil
 
 	case mrDiffLoadedMsg:
@@ -148,24 +236,81 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.diffSearchActive = false
 		m.diffSearchInput = ""
 		m.screen = screenDiff
+		m.navActive = false
 		return m, nil
 
 	case pipelineLoadedMsg:
 		m.loading = false
+		// A poll-triggered refresh of the SAME pipeline shouldn't reset the
+		// user's place in the job list — only a genuine navigation (a
+		// different pipeline, or arriving at this screen fresh) should.
+		samePipeline := m.screen == screenPipeline && m.pipeline != nil && msg.pipeline != nil && m.pipeline.ID == msg.pipeline.ID
 		m.pipeline = msg.pipeline
 		m.jobs = msg.jobs
-		m.jobCursor = 0
-		m.jobOffset = 0
+		m.lastPipelineFetch = time.Now()
+		if samePipeline {
+			m.jobCursor = min(m.jobCursor, max(0, len(m.jobs)-1))
+			m.jobOffset = min(m.jobOffset, max(0, len(m.jobs)-1))
+		} else {
+			m.jobCursor = 0
+			m.jobOffset = 0
+			m.navActive = false
+		}
 		m.screen = screenPipeline
+		m.pollGen++
+		if isPipelineActive(m.pipeline) {
+			return m, pipelinePollTickCmd(m.pollGen)
+		}
 		return m, nil
+
+	case pipelinePollTickMsg:
+		if msg.gen != m.pollGen || m.screen != screenPipeline || m.detail == nil || !isPipelineActive(m.pipeline) {
+			return m, nil
+		}
+		return m, loadPipelineCmd(m.deps, m.detail)
 
 	case jobLogLoadedMsg:
 		m.loading = false
+		sameJob := m.jobLog.job != nil && msg.job != nil && m.jobLog.job.ID == msg.job.ID
+		if !sameJob {
+			m.jobLogFollowing = false
+		}
+		prevOffset, prevQuery := m.jobLog.lineOffset, m.jobLog.searchQuery
 		m.jobLog = newLogState(msg.job, msg.log)
 		m.jobLogSearchActive = false
 		m.jobLogSearchInput = ""
 		m.screen = screenJobLog
-		return m, nil
+		m.lastJobLogFetch = time.Now()
+		if sameJob {
+			// A follow-tick refresh used to silently reset lineOffset and
+			// wipe the active search/match counter on every tick; carry them
+			// across (follow mode's scrollToEnd below still takes over if
+			// it's still active — that jump is the point of "follow").
+			m.jobLog.lineOffset = min(prevOffset, m.jobLog.maxLineOffset(m.logBodyHeight()))
+			if prevQuery != "" {
+				m.jobLog.search(prevQuery, m.logBodyHeight())
+			}
+		} else {
+			m.navActive = false
+		}
+
+		if !m.jobLogFollowing {
+			return m, nil
+		}
+		if msg.job == nil || !isJobActive(msg.job.Status) {
+			m.jobLogFollowing = false
+			m.status = "Job finished; follow mode stopped."
+			return m, nil
+		}
+		m.jobLog.scrollToEnd(m.logBodyHeight())
+		m.jobLogPollGen++
+		return m, jobLogFollowTickCmd(m.jobLogPollGen)
+
+	case jobLogFollowTickMsg:
+		if !m.jobLogFollowing || msg.gen != m.jobLogPollGen || m.screen != screenJobLog || m.jobLog.job == nil {
+			return m, nil
+		}
+		return m, followJobLogCmd(m.deps, m.jobLog.job.ID)
 
 	case pipelineActionDoneMsg:
 		m.status = msg.status
@@ -184,22 +329,55 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.dash != nil {
 			m.dash.Branch = msg.branch
 		}
+		if msg.projects != nil || msg.branches != nil {
+			m.recentProjects = msg.projects
+			m.recentBranches = msg.branches
+		}
 		m.status = "Checked out " + msg.branch
 		return m, nil
 
 	case discussionsLoadedMsg:
 		m.loading = false
-		m.discuss = newDiscussState(msg.discussions)
+		m.discuss = newDiscussState(msg.discussions, m.contentWidth())
 		m.commentActive = false
 		m.commentInput = ""
 		m.screen = screenDiscussions
+		m.navActive = false
 		return m, nil
 
 	case commitsLoadedMsg:
 		m.loading = false
 		m.commits = msg.commits
+		m.commitCursor = 0
 		m.commitOffset = 0
 		m.screen = screenCommits
+		m.navActive = false
+		return m, nil
+
+	case searchLoadedMsg:
+		m.searchLoading = false
+		if msg.query == m.searchInput {
+			m.searchResults = msg.results
+			m.searchCursor = 0
+		}
+		return m, nil
+
+	case workspacesLoadedMsg:
+		m.loading = false
+		m.workspaces = msg.workspaces
+		if m.workspaceCursor >= len(m.workspaces) {
+			m.workspaceCursor = max(0, len(m.workspaces)-1)
+		}
+		m.screen = screenWorkspace
+		m.navActive = false
+		return m, nil
+
+	case workspaceSavedMsg:
+		m.loading = false
+		m.workspaces = msg.workspaces
+		m.status = msg.status
+		m.screen = screenWorkspace
+		m.navActive = false
 		return m, nil
 
 	case commentPostedMsg:
@@ -217,10 +395,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.loading = false
 			m.confirmActive = true
 			m.confirmPrompt = fmt.Sprintf("Uncommitted changes present. Check out !%d anyway?", msg.iid)
-			m.confirmCmd = checkoutMRCmd(m.deps, msg.iid)
+			m.confirmCmd = checkoutMRCmd(m.deps, m.dash, m.detail)
 			return m, nil
 		}
-		return m, checkoutMRCmd(m.deps, msg.iid)
+		return m, checkoutMRCmd(m.deps, m.dash, m.detail)
 
 	case statusMsg:
 		m.status = msg.text
@@ -228,13 +406,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case errMsg:
 		m.loading = false
+		m.dashLoading = false
 		m.err = msg.err
 		return m, nil
 
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		if len(m.discuss.discussions) > 0 {
+			// Discussion bodies are word-wrapped at the width they were
+			// loaded at; without this a resize left them wrapped for
+			// whatever width the MR was first opened at instead of reflowing.
+			cursor, offset := m.discuss.cursor, m.discuss.lineOffset
+			m.discuss = newDiscussState(m.discuss.discussions, m.contentWidth())
+			m.discuss.cursor = min(cursor, max(0, len(m.discuss.threads)-1))
+			m.discuss.lineOffset = min(offset, m.discuss.maxLineOffset(m.discussBodyHeight()))
+		}
 		return m, nil
+
+	case tea.MouseMsg:
+		return m.handleMouse(msg)
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
@@ -242,9 +433,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	switch msg.Button {
+	case tea.MouseButtonWheelUp:
+		return m.handleKey(tea.KeyMsg{Type: tea.KeyUp})
+	case tea.MouseButtonWheelDown:
+		return m.handleKey(tea.KeyMsg{Type: tea.KeyDown})
+	case tea.MouseButtonLeft:
+		if msg.Action == tea.MouseActionPress {
+			return m.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
+		}
+	}
+	return m, nil
+}
+
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.confirmActive {
 		return m.handleConfirmKey(msg)
+	}
+	if m.commandPaletteActive {
+		return m.handleCommandPaletteKey(msg)
 	}
 	if m.diffSearchActive {
 		return m.handleDiffSearchKey(msg)
@@ -254,6 +462,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.commentActive {
 		return m.handleCommentKey(msg)
+	}
+	if m.searchActive {
+		return m.handleGlobalSearchKey(msg)
 	}
 	if m.showHelp {
 		switch msg.String() {
@@ -269,6 +480,12 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "q", "ctrl+c":
 		return m, tea.Quit
 
+	case "ctrl+k":
+		m.commandPaletteActive = true
+		m.commandPaletteInput = ""
+		m.commandPaletteCursor = 0
+		return m, nil
+
 	case "?":
 		m.showHelp = true
 
@@ -279,11 +496,14 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.screen = screenPipeline
 		case screenDiff, screenPipeline, screenDiscussions, screenCommits:
 			m.screen = screenDetail
+		case screenSearch, screenWorkspace:
+			m.screen = screenDashboard
 		case screenDetail:
 			m.screen = screenList
 		case screenList:
 			m.screen = screenDashboard
 		}
+		m.navActive = false
 		return m, nil
 
 	case "r":
@@ -313,16 +533,90 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.screen == screenCommits && m.detail != nil {
 			return m, loadCommitsCmd(m.deps, m.detail.IID)
 		}
-		return m, loadDashboardCmd(m.deps)
+		if m.screen == screenSearch && strings.TrimSpace(m.searchInput) != "" {
+			m.searchLoading = true
+			return m, loadSearchCmd(m.client, m.searchInput, m.currentProject())
+		}
+		if m.screen == screenWorkspace {
+			m.loading = true
+			return m, loadWorkspacesCmd(m.deps, m.client)
+		}
+		// Dashboard refresh reloads "as one" too: spinner up, new generation so
+		// any lingering tick from the previous load stops itself.
+		m.dashLoading = true
+		m.spinnerGen++
+		return m, tea.Batch(loadDashboardCmd(m.deps), spinnerTickCmd(m.spinnerGen))
+
+	case "/":
+		if m.client == nil {
+			return m, nil
+		}
+		if m.screen == screenDiff {
+			m.diffSearchActive = true
+			m.diffSearchInput = m.diff.searchQuery
+			m.status = "/" + m.diffSearchInput
+			return m, nil
+		}
+		if m.screen == screenJobLog {
+			m.jobLogSearchActive = true
+			m.jobLogSearchInput = m.jobLog.searchQuery
+			m.status = "/" + m.jobLogSearchInput
+			return m, nil
+		}
+		{
+			m.screen = screenSearch
+			m.navActive = false
+			m.searchActive = true
+			m.searchInput = ""
+			m.searchResults = nil
+			m.searchCursor = 0
+			m.status = "search: "
+			return m, nil
+		}
 
 	case "m":
 		if m.dash == nil || m.client == nil {
 			return m, nil
 		}
 		m.screen = screenList
+		m.navActive = false
 		m.loading = true
 		m.status = ""
+		m.mrScope = mrScopeProject
+		m.mrFilter = mrFilterAll
+		m.cursor = 0
 		return m, loadMRListCmd(m.client, m.dash.Project.ID)
+
+	case "f":
+		if m.screen == screenList && m.client != nil {
+			m.mrScope = m.mrScope.next()
+			m.cursor = 0
+			m.loading = true
+			m.status = ""
+			return m, loadMRScopeCmd(m.client, m.mrScope, m.projectID())
+		}
+		if m.screen == screenJobLog && m.jobLog.job != nil {
+			if m.jobLogFollowing {
+				m.jobLogFollowing = false
+				m.status = "Follow mode off."
+				return m, nil
+			}
+			if !isJobActive(m.jobLog.job.Status) {
+				m.status = "Job isn't running; nothing to follow."
+				return m, nil
+			}
+			m.jobLogFollowing = true
+			m.jobLogPollGen++
+			m.status = "Follow mode on."
+			return m, jobLogFollowTickCmd(m.jobLogPollGen)
+		}
+
+	case "F":
+		if m.screen == screenList {
+			m.mrFilter = m.mrFilter.next()
+			m.cursor = 0
+			m.status = "Filter: " + m.mrFilter.label()
+		}
 
 	case "o":
 		if url := m.currentURL(); url != "" {
@@ -330,16 +624,43 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case "y":
+		if m.screen == screenJobLog {
+			if line := m.jobLog.currentLineText(); line != "" {
+				return m, copyToClipboardCmd(line, "Line copied to clipboard.")
+			}
+			return m, nil
+		}
+		if m.screen == screenDiff {
+			if line := m.diff.currentLineText(); line != "" {
+				return m, copyToClipboardCmd(line, "Line copied to clipboard.")
+			}
+			return m, nil
+		}
 		if url := m.currentURL(); url != "" {
 			return m, copyLinkCmd(url)
 		}
 
 	case "Y":
+		if m.screen == screenWorkspace && len(m.workspaces) > 0 {
+			return m, copyToClipboardCmd(workspaceSummary(m.workspaces[m.workspaceCursor]), "Workspace summary copied to clipboard.")
+		}
+		if m.screen == screenDiff {
+			if hunk := m.diff.currentHunkText(); hunk != "" {
+				return m, copyToClipboardCmd(hunk, "Hunk copied to clipboard.")
+			}
+			return m, nil
+		}
 		if mr := m.summaryMR(); mr != nil {
-			return m, copyToClipboardCmd(mrSummary(mr, m.projectPath()), "Summary copied to clipboard.")
+			text := mrSummary(mr, m.projectPath(), m.summaryFormat, m.summaryExtras(mr))
+			return m, copyToClipboardCmd(text, fmt.Sprintf("Summary copied to clipboard (%s).", m.summaryFormat.label()))
 		}
 
+	case "T":
+		m.summaryFormat = m.summaryFormat.next()
+		m.status = "Summary format: " + m.summaryFormat.label()
+
 	case "up", "k":
+		moved := true
 		switch {
 		case m.screen == screenList && m.cursor > 0:
 			m.cursor--
@@ -356,11 +677,21 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.scrollCommits(-1)
 		case m.screen == screenDashboard && m.dashCursor > m.dashMinCursor():
 			m.dashCursor--
+		case m.screen == screenSearch && m.searchCursor > 0:
+			m.searchCursor--
+		case m.screen == screenWorkspace && m.workspaceCursor > 0:
+			m.workspaceCursor--
+		default:
+			moved = false
+		}
+		if !moved {
+			m.moveNav(-1)
 		}
 
 	case "down", "j":
+		moved := true
 		switch {
-		case m.screen == screenList && m.cursor < len(m.mrs)-1:
+		case m.screen == screenList && m.cursor < len(m.filteredMRs())-1:
 			m.cursor++
 		case m.screen == screenDiff:
 			m.scrollDiff(1)
@@ -375,16 +706,30 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.scrollCommits(1)
 		case m.screen == screenDashboard && m.dashCursor < m.dashMaxCursor():
 			m.dashCursor++
+		case m.screen == screenSearch && m.searchCursor < len(m.searchResults)-1:
+			m.searchCursor++
+		case m.screen == screenWorkspace && m.workspaceCursor < len(m.workspaces)-1:
+			m.workspaceCursor++
+		default:
+			moved = false
+		}
+		if !moved {
+			m.moveNav(1)
 		}
 
 	case "left", "h":
 		if m.screen == screenDiff {
 			m.diff.moveFile(-1)
+		} else {
+			m.navActive = true
+			m.navCursor = m.activeNavIndex()
 		}
 
 	case "right", "l":
 		if m.screen == screenDiff {
 			m.diff.moveFile(1)
+		} else if m.navActive {
+			return m.activateNav()
 		}
 
 	case "[":
@@ -395,18 +740,6 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "]":
 		if m.screen == screenDiff {
 			m.diff.moveHunk(1, m.contentHeight())
-		}
-
-	case "/":
-		if m.screen == screenDiff {
-			m.diffSearchActive = true
-			m.diffSearchInput = m.diff.searchQuery
-			m.status = "/" + m.diffSearchInput
-		}
-		if m.screen == screenJobLog {
-			m.jobLogSearchActive = true
-			m.jobLogSearchInput = m.jobLog.searchQuery
-			m.status = "/" + m.jobLogSearchInput
 		}
 
 	case "n":
@@ -462,9 +795,27 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, toggleMRDraftCmd(m.deps, m.detail.IID, !m.detail.Draft)
 		}
 
+	case "W":
+		if m.detail != nil && m.dash != nil {
+			m.loading = true
+			m.status = ""
+			return m, addCurrentMRToWorkspaceCmd(m.deps, m.dash, m.detail)
+		}
+
+	case "shift+tab":
+		fallthrough
+	case "tab":
+		m.screen = screenWorkspace
+		m.navActive = false
+		m.loading = true
+		return m, loadWorkspacesCmd(m.deps, m.client)
+
 	case "s":
 		if m.screen == screenDiff {
 			m.diffSideBySide = !m.diffSideBySide
+		}
+		if m.screen == screenJobLog && m.jobLog.job != nil {
+			return m, saveJobLogCmd(m.deps, m.jobLog.job, m.jobLog.raw)
 		}
 
 	case "a":
@@ -504,6 +855,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.screen == screenDiscussions && m.detail != nil {
 			m.commentActive = true
 			m.commentInput = ""
+			m.commentReplyID = ""
 			m.status = "comment: "
 		}
 
@@ -515,10 +867,16 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case "enter":
-		if m.screen == screenList && len(m.mrs) > 0 {
-			selected := m.mrs[m.cursor]
-			m.loading = true
-			return m, loadMRDetailCmd(m.client, m.dash.Project.ID, selected.IID)
+		if m.navActive {
+			return m.activateNav()
+		}
+		if m.screen == screenList {
+			mrs := m.filteredMRs()
+			if len(mrs) > 0 && m.cursor >= 0 && m.cursor < len(mrs) {
+				selected := mrs[m.cursor]
+				m.loading = true
+				return m, loadMRDetailCmd(m.client, selected.ProjectID, selected.IID)
+			}
 		}
 		if m.screen == screenDashboard {
 			items := m.recentBranchItems()
@@ -540,6 +898,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.loading = true
 			m.status = ""
 			return m, loadJobLogCmd(m.deps, m.jobs[m.jobCursor])
+		}
+		if m.screen == screenSearch && len(m.searchResults) > 0 {
+			return m.openSearchResult()
 		}
 
 	case "d":
@@ -574,6 +935,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.discuss.lineOffset = 0
 		}
 		if m.screen == screenCommits {
+			m.commitCursor = 0
 			m.commitOffset = 0
 		}
 
@@ -594,7 +956,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			m.discuss.scrollToEnd(m.discussBodyHeight())
 		}
-		if m.screen == screenCommits {
+		if m.screen == screenCommits && len(m.commits) > 0 {
+			m.commitCursor = len(m.commits) - 1
 			m.commitOffset = max(0, len(m.commits)-max(1, m.discussBodyHeight()))
 		}
 
@@ -608,6 +971,13 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.loading = true
 			m.status = ""
 			return m, retryJobCmd(m.deps, m.jobLog.job.ID)
+		case m.screen == screenDiscussions && m.detail != nil:
+			if thread, ok := m.discuss.currentThread(); ok {
+				m.commentActive = true
+				m.commentInput = ""
+				m.commentReplyID = thread.id
+				m.status = "reply: "
+			}
 		}
 
 	case "P":
@@ -632,6 +1002,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case "x":
+		if m.screen == screenWorkspace && m.detail != nil && m.dash != nil {
+			m.loading = true
+			m.status = ""
+			return m, removeCurrentMRFromWorkspaceCmd(m.deps, m.dash, m.detail)
+		}
 		var pipelineID int
 		switch {
 		case m.screen == screenPipeline && m.pipeline != nil:
@@ -646,6 +1021,208 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+func (m *Model) moveNav(delta int) {
+	count := len(navItems())
+	if count == 0 {
+		return
+	}
+	if !m.navActive {
+		m.navCursor = m.activeNavIndex()
+		m.navActive = true
+	}
+	m.navCursor = (m.navCursor + delta + count) % count
+	m.status = "navigation: " + navItems()[m.navCursor].name
+}
+
+func (m Model) activeNavIndex() int {
+	for i, item := range navItems() {
+		if item.matches(m.screen) {
+			return i
+		}
+	}
+	return 0
+}
+
+func (m Model) activateNav() (tea.Model, tea.Cmd) {
+	items := navItems()
+	if len(items) == 0 {
+		return m, nil
+	}
+	if m.navCursor < 0 || m.navCursor >= len(items) {
+		m.navCursor = m.activeNavIndex()
+	}
+	m.navActive = false
+	m.status = ""
+	switch items[m.navCursor].target {
+	case screenDashboard:
+		m.screen = screenDashboard
+		return m, nil
+	case screenList:
+		if m.dash == nil || m.client == nil {
+			m.status = "Merge requests are not available yet."
+			return m, nil
+		}
+		m.screen = screenList
+		m.loading = true
+		m.mrScope = mrScopeProject
+		m.mrFilter = mrFilterAll
+		m.cursor = 0
+		return m, loadMRListCmd(m.client, m.dash.Project.ID)
+	case screenPipeline:
+		if m.detail != nil && m.detail.Pipeline != nil {
+			m.loading = true
+			return m, loadPipelineCmd(m.deps, m.detail)
+		}
+		if m.dash != nil && m.dash.MergeRequest != nil && m.dash.MergeRequest.Pipeline != nil {
+			m.detail = m.dash.MergeRequest
+			m.loading = true
+			return m, loadPipelineCmd(m.deps, m.dash.MergeRequest)
+		}
+		m.status = "No pipeline is available for the current MR."
+		return m, nil
+	case screenSearch:
+		if m.client == nil {
+			m.status = "Search is not available yet."
+			return m, nil
+		}
+		m.screen = screenSearch
+		m.searchActive = true
+		m.searchInput = ""
+		m.searchResults = nil
+		m.searchCursor = 0
+		m.status = "search: "
+		return m, nil
+	case screenWorkspace:
+		if m.client == nil {
+			m.status = "Workspace is not available yet."
+			return m, nil
+		}
+		m.screen = screenWorkspace
+		m.loading = true
+		return m, loadWorkspacesCmd(m.deps, m.client)
+	default:
+		m.screen = items[m.navCursor].target
+		return m, nil
+	}
+}
+
+type commandPaletteEntry struct {
+	title       string
+	description string
+	terms       string
+	enabled     bool
+	run         func(Model) (tea.Model, tea.Cmd)
+}
+
+func (m Model) handleCommandPaletteKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c":
+		return m, tea.Quit
+	case "esc":
+		m.commandPaletteActive = false
+		m.commandPaletteInput = ""
+		m.commandPaletteCursor = 0
+		return m, nil
+	case "up", "k":
+		if m.commandPaletteCursor > 0 {
+			m.commandPaletteCursor--
+		}
+		return m, nil
+	case "down", "j":
+		if maxCursor := len(m.filteredCommandPaletteEntries()) - 1; m.commandPaletteCursor < maxCursor {
+			m.commandPaletteCursor++
+		}
+		return m, nil
+	case "enter":
+		entries := m.filteredCommandPaletteEntries()
+		if len(entries) == 0 {
+			return m, nil
+		}
+		if m.commandPaletteCursor >= len(entries) {
+			m.commandPaletteCursor = len(entries) - 1
+		}
+		entry := entries[m.commandPaletteCursor]
+		m.commandPaletteActive = false
+		m.commandPaletteInput = ""
+		m.commandPaletteCursor = 0
+		return entry.run(m)
+	case "backspace", "ctrl+h":
+		if len(m.commandPaletteInput) > 0 {
+			runes := []rune(m.commandPaletteInput)
+			m.commandPaletteInput = string(runes[:len(runes)-1])
+			m.commandPaletteCursor = 0
+		}
+		return m, nil
+	}
+
+	if len(msg.Runes) > 0 {
+		m.commandPaletteInput += string(msg.Runes)
+		m.commandPaletteCursor = 0
+	}
+	return m, nil
+}
+
+func (m Model) filteredCommandPaletteEntries() []commandPaletteEntry {
+	query := strings.ToLower(strings.TrimSpace(m.commandPaletteInput))
+	entries := make([]commandPaletteEntry, 0)
+	for _, entry := range m.commandPaletteEntries() {
+		if !entry.enabled {
+			continue
+		}
+		haystack := strings.ToLower(entry.title + " " + entry.description + " " + entry.terms)
+		if query == "" || strings.Contains(haystack, query) {
+			entries = append(entries, entry)
+		}
+	}
+	return entries
+}
+
+func (m Model) commandPaletteEntries() []commandPaletteEntry {
+	keyAction := func(key string) func(Model) (tea.Model, tea.Cmd) {
+		return func(m Model) (tea.Model, tea.Cmd) {
+			return m.handleKey(keyMsg(key))
+		}
+	}
+	return []commandPaletteEntry{
+		{title: "Go to dashboard", description: "Return to the dashboard", terms: "home", enabled: m.screen != screenDashboard, run: func(m Model) (tea.Model, tea.Cmd) {
+			m.screen = screenDashboard
+			m.status = ""
+			return m, nil
+		}},
+		{title: "Open merge requests", description: "List project merge requests", terms: "mrs list", enabled: m.dash != nil && m.client != nil, run: keyAction("m")},
+		{title: "Open global search", description: "Search projects, MRs, and branches", terms: "find", enabled: m.client != nil, run: keyAction("/")},
+		{title: "Open workspace", description: "Load the multi-repo workspace", terms: "multi repo tab", enabled: m.client != nil, run: keyAction("tab")},
+		{title: "Refresh current screen", description: "Reload visible data", terms: "reload", enabled: m.dash != nil, run: keyAction("r")},
+		{title: "Open in browser", description: "Open the current GitLab URL", terms: "web url", enabled: m.currentURL() != "", run: keyAction("o")},
+		{title: "Copy current link", description: "Copy the current GitLab URL", terms: "clipboard url", enabled: m.currentURL() != "", run: keyAction("y")},
+		{title: "Show current MR", description: "Open the current branch merge request", terms: "detail", enabled: m.screen == screenDashboard && m.dash != nil && m.dash.MergeRequest != nil, run: keyAction("enter")},
+		{title: "Open diff", description: "Load the selected MR diff", terms: "changes files", enabled: m.detail != nil, run: keyAction("d")},
+		{title: "Open pipeline", description: "Load the selected MR pipeline", terms: "ci jobs", enabled: m.detail != nil && m.detail.Pipeline != nil, run: keyAction("p")},
+		{title: "Open discussions", description: "Load MR threads and comments", terms: "comments threads", enabled: m.detail != nil, run: keyAction("c")},
+		{title: "Open commits", description: "Load MR commits", terms: "changes history", enabled: m.detail != nil, run: keyAction("C")},
+		{title: "Checkout MR branch", description: "Check out the selected MR locally", terms: "branch git", enabled: m.detail != nil, run: keyAction("b")},
+		{title: "Approve MR", description: "Approve the selected merge request", terms: "review", enabled: m.screen == screenDetail && m.detail != nil, run: keyAction("a")},
+		{title: "Remove approval", description: "Revoke your approval from the MR", terms: "review revoke", enabled: m.screen == screenDetail && m.detail != nil, run: keyAction("A")},
+		{title: "Merge MR", description: "Merge the selected merge request", terms: "accept", enabled: m.screen == screenDetail && m.detail != nil, run: keyAction("M")},
+		{title: "Cancel pipeline", description: "Cancel the current pipeline", terms: "stop ci", enabled: (m.screen == screenPipeline && m.pipeline != nil) || (m.screen == screenDetail && m.detail != nil && m.detail.Pipeline != nil), run: keyAction("x")},
+	}
+}
+
+func keyMsg(key string) tea.KeyMsg {
+	switch key {
+	case "enter":
+		return tea.KeyMsg{Type: tea.KeyEnter}
+	case "esc":
+		return tea.KeyMsg{Type: tea.KeyEsc}
+	case "tab":
+		return tea.KeyMsg{Type: tea.KeyTab}
+	case "ctrl+k":
+		return tea.KeyMsg{Type: tea.KeyCtrlK}
+	default:
+		return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(key)}
+	}
 }
 
 func (m Model) handleConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -732,6 +1309,45 @@ func (m Model) handleJobLogSearchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m Model) handleGlobalSearchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c":
+		return m, tea.Quit
+	case "esc":
+		m.searchActive = false
+		m.status = ""
+		return m, nil
+	case "enter":
+		m.searchActive = false
+		if strings.TrimSpace(m.searchInput) == "" {
+			m.status = ""
+			return m, nil
+		}
+		m.searchLoading = true
+		m.status = ""
+		return m, loadSearchCmd(m.client, m.searchInput, m.currentProject())
+	case "backspace", "ctrl+h":
+		if len(m.searchInput) > 0 {
+			runes := []rune(m.searchInput)
+			m.searchInput = string(runes[:len(runes)-1])
+		}
+		return m, nil
+	}
+	if len(msg.Runes) > 0 {
+		m.searchInput += string(msg.Runes)
+	}
+	return m, nil
+}
+
+// commentPrompt is the status-bar prefix while composing — distinguishes a
+// reply to a specific thread from a new top-level comment.
+func (m Model) commentPrompt() string {
+	if m.commentReplyID != "" {
+		return "reply: "
+	}
+	return "comment: "
+}
+
 func (m Model) handleCommentKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c":
@@ -739,12 +1355,18 @@ func (m Model) handleCommentKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "esc":
 		m.commentActive = false
 		m.commentInput = ""
+		m.commentReplyID = ""
 		m.status = "Comment cancelled."
+		return m, nil
+	case "alt+enter":
+		m.commentInput += "\n"
 		return m, nil
 	case "enter":
 		body := strings.TrimSpace(m.commentInput)
+		replyID := m.commentReplyID
 		m.commentActive = false
 		m.commentInput = ""
+		m.commentReplyID = ""
 		if body == "" {
 			m.status = "Empty comment, nothing posted."
 			return m, nil
@@ -754,21 +1376,67 @@ func (m Model) handleCommentKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.loading = true
 		m.status = ""
+		if replyID != "" {
+			return m, replyDiscussionCmd(m.deps, m.detail.IID, replyID, body)
+		}
 		return m, postCommentCmd(m.deps, m.detail.IID, body)
 	case "backspace", "ctrl+h":
 		if len(m.commentInput) > 0 {
 			runes := []rune(m.commentInput)
 			m.commentInput = string(runes[:len(runes)-1])
 		}
-		m.status = "comment: " + m.commentInput
 		return m, nil
 	}
 
 	if len(msg.Runes) > 0 {
 		m.commentInput += string(msg.Runes)
-		m.status = "comment: " + m.commentInput
 	}
 	return m, nil
+}
+
+func (m Model) openSearchResult() (tea.Model, tea.Cmd) {
+	if m.searchCursor < 0 || m.searchCursor >= len(m.searchResults) {
+		return m, nil
+	}
+	result := m.searchResults[m.searchCursor]
+	switch result.Type {
+	case "merge_request":
+		if result.MR != nil {
+			m.loading = true
+			projectID := result.MR.ProjectID
+			if projectID == 0 && m.dash != nil && m.dash.Project != nil {
+				projectID = m.dash.Project.ID
+			}
+			if projectID == 0 {
+				m.status = "Search result has no project id."
+				return m, nil
+			}
+			return m, loadMRDetailCmd(m.client, projectID, result.MR.IID)
+		}
+	case "project":
+		if result.Project != nil && result.Project.WebURL != "" {
+			return m, openBrowserCmd(result.Project.WebURL)
+		}
+	case "branch":
+		if result.Branch != nil && result.Branch.WebURL != "" {
+			return m, openBrowserCmd(result.Branch.WebURL)
+		}
+	}
+	return m, nil
+}
+
+func (m Model) currentProject() *gitlab.Project {
+	if m.dash != nil {
+		return m.dash.Project
+	}
+	return nil
+}
+
+func (m Model) projectID() int {
+	if m.dash != nil && m.dash.Project != nil {
+		return m.dash.Project.ID
+	}
+	return 0
 }
 
 func (m *Model) scrollDiff(delta int) {
@@ -779,16 +1447,24 @@ func (m *Model) scrollJobLog(delta int) {
 	m.jobLog.scroll(delta, m.logBodyHeight())
 }
 
+// ensureJobVisible scrolls jobOffset so jobCursor falls within the window
+// jobWindowFrom would actually render — a flat "cursor >= offset+height"
+// check assumes one row per job, which undercounts once stage headers are in
+// play, letting `j` walk the highlight into rows the frame had clipped.
 func (m *Model) ensureJobVisible() {
-	height := m.jobListHeight()
-	if height <= 0 {
+	if m.jobListHeight() <= 0 {
 		return
 	}
 	if m.jobCursor < m.jobOffset {
 		m.jobOffset = m.jobCursor
+		return
 	}
-	if m.jobCursor >= m.jobOffset+height {
-		m.jobOffset = m.jobCursor - height + 1
+	for m.jobOffset < m.jobCursor {
+		_, end := m.jobWindowFrom(m.jobOffset)
+		if m.jobCursor < end {
+			return
+		}
+		m.jobOffset++
 	}
 }
 

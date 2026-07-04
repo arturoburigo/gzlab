@@ -24,6 +24,18 @@ func fakeGitLabServer(t *testing.T) *httptest.Server {
 	return srv
 }
 
+// fakeUnauthorizedGitLabServer simulates a host that rejects every token —
+// used to test the "token is not valid" error paths (auth status, profile test).
+func fakeUnauthorizedGitLabServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_ = json.NewEncoder(w).Encode(map[string]any{"message": "401 Unauthorized"})
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
 func TestAuthLogin_SavesProfileAndNeverPersistsToken(t *testing.T) {
 	home := withIsolatedHome(t)
 	srv := fakeGitLabServer(t)

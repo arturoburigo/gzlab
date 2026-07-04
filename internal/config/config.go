@@ -1,5 +1,7 @@
-// Package config models and persists gitlab-tui's local configuration file.
+// Package config models and persists gzlab's local configuration file.
 package config
+
+import "time"
 
 // Config is the root of ~/.config/gitlab-tui/config.yaml.
 type Config struct {
@@ -45,7 +47,23 @@ type DiffConfig struct {
 
 // CacheConfig controls local response caching (Épico 21).
 type CacheConfig struct {
-	Enabled bool `yaml:"enabled"`
+	Enabled bool           `yaml:"enabled"`
+	TTL     CacheTTLConfig `yaml:"ttl"`
+}
+
+// CacheTTLConfig lets each cached data type use its own retention window.
+// Values are duration strings (e.g. "45s", "24h"); unset fields keep the
+// defaults set by Default() below.
+type CacheTTLConfig struct {
+	CurrentUser        Duration `yaml:"current_user"`
+	Project            Duration `yaml:"project"`
+	MergeRequestList   Duration `yaml:"merge_request_list"`
+	MergeRequestDetail Duration `yaml:"merge_request_detail"`
+	Diff               Duration `yaml:"diff"`
+	Pipeline           Duration `yaml:"pipeline"`
+	PipelineJobs       Duration `yaml:"pipeline_jobs"`
+	Commits            Duration `yaml:"commits"`
+	ContributionEvents Duration `yaml:"contribution_events"`
 }
 
 // Default returns a new Config with no profiles and sane defaults for
@@ -69,6 +87,17 @@ func Default() *Config {
 		},
 		Cache: CacheConfig{
 			Enabled: true,
+			TTL: CacheTTLConfig{
+				CurrentUser:        Duration(24 * time.Hour),
+				Project:            Duration(24 * time.Hour),
+				MergeRequestList:   Duration(45 * time.Second),
+				MergeRequestDetail: Duration(45 * time.Second),
+				Diff:               Duration(5 * time.Minute),
+				Pipeline:           Duration(15 * time.Second),
+				PipelineJobs:       Duration(15 * time.Second),
+				Commits:            Duration(5 * time.Minute),
+				ContributionEvents: Duration(5 * time.Minute),
+			},
 		},
 	}
 }

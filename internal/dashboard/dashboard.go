@@ -9,9 +9,9 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/arturoburigo/gitlab-tui/internal/config"
-	"github.com/arturoburigo/gitlab-tui/internal/gitdetect"
-	"github.com/arturoburigo/gitlab-tui/internal/gitlab"
+	"github.com/arturoburigo/gzlab/internal/config"
+	"github.com/arturoburigo/gzlab/internal/gitdetect"
+	"github.com/arturoburigo/gzlab/internal/gitlab"
 )
 
 // Context is everything the dashboard screen needs to render.
@@ -42,7 +42,7 @@ func Resolve(ctx context.Context, cfg *config.Config, newClient NewClientFunc, r
 		}
 		matched, ok := gitdetect.MatchProfileByHost(hosts, remote.Host)
 		if !ok {
-			return nil, fmt.Errorf("no profile configured for host %s; run `gitlab-tui auth login`", remote.Host)
+			return nil, fmt.Errorf("no profile configured for host %s; run `gzlab auth login`", remote.Host)
 		}
 		profileName = matched
 	}

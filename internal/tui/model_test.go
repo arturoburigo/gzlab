@@ -3,35 +3,52 @@ package tui
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
-	"github.com/arturoburigo/gitlab-tui/internal/config"
-	"github.com/arturoburigo/gitlab-tui/internal/dashboard"
-	"github.com/arturoburigo/gitlab-tui/internal/gitlab"
-	"github.com/arturoburigo/gitlab-tui/internal/history"
+	"github.com/arturoburigo/gzlab/internal/config"
+	"github.com/arturoburigo/gzlab/internal/dashboard"
+	"github.com/arturoburigo/gzlab/internal/gitlab"
+	"github.com/arturoburigo/gzlab/internal/history"
 )
 
 type mockClient struct {
-	mrs      []*gitlab.MergeRequest
-	detail   *gitlab.MergeRequest
-	diffs    []*gitlab.MergeRequestDiff
-	pipeline *gitlab.Pipeline
-	jobs     []*gitlab.Job
+	mrs              []*gitlab.MergeRequest
+	assignedMRs      []*gitlab.MergeRequest
+	detail           *gitlab.MergeRequest
+	diffs            []*gitlab.MergeRequestDiff
+	pipeline         *gitlab.Pipeline
+	jobs             []*gitlab.Job
+	commits          []gitlab.Commit
+	activity         []gitlab.ContributionEvent
+	user             *gitlab.User
+	lastActivityOpts gitlab.ListContributionEventsOptions
 }
 
-func (m *mockClient) CurrentUser(ctx context.Context) (*gitlab.User, error) { return nil, nil }
+func (m *mockClient) CurrentUser(ctx context.Context) (*gitlab.User, error) { return m.user, nil }
 func (m *mockClient) GetProjectByPath(ctx context.Context, path string) (*gitlab.Project, error) {
 	return nil, nil
 }
 func (m *mockClient) ListMergeRequests(ctx context.Context, projectID int, opts gitlab.ListMergeRequestsOptions) ([]*gitlab.MergeRequest, error) {
 	return m.mrs, nil
+}
+func (m *mockClient) ListMyMergeRequests(ctx context.Context, opts gitlab.ListMyMergeRequestsOptions) ([]*gitlab.MergeRequest, error) {
+	if opts.Scope == gitlab.MergeRequestsScopeAssignedToMe {
+		return m.assignedMRs, nil
+	}
+	return m.mrs, nil
+}
+func (m *mockClient) Search(ctx context.Context, opts gitlab.GlobalSearchOptions) ([]gitlab.GlobalSearchResult, error) {
+	return nil, nil
 }
 func (m *mockClient) GetMergeRequest(ctx context.Context, projectID, iid int) (*gitlab.MergeRequest, error) {
 	return m.detail, nil
@@ -47,6 +64,13 @@ func (m *mockClient) ListPipelineJobs(ctx context.Context, projectID, pipelineID
 }
 func (m *mockClient) FindMergeRequestForBranch(ctx context.Context, projectID int, branch string) (*gitlab.MergeRequest, error) {
 	return nil, gitlab.ErrNotFound
+}
+func (m *mockClient) ListCommits(ctx context.Context, projectID int, opts gitlab.ListCommitsOptions) ([]gitlab.Commit, error) {
+	return m.commits, nil
+}
+func (m *mockClient) ListMyContributionEvents(ctx context.Context, opts gitlab.ListContributionEventsOptions) ([]gitlab.ContributionEvent, error) {
+	m.lastActivityOpts = opts
+	return m.activity, nil
 }
 
 func testDashContext() *dashboard.Context {
@@ -79,7 +103,11 @@ func loadedModel(t *testing.T, client *mockClient) Model {
 	if got.client == nil {
 		t.Fatal("expected client to be set after dashboardLoadedMsg")
 	}
-	return got
+	// The dashboard now loads "as one": the stats phase still pending keeps the
+	// spinner up (dashLoading). Deliver an (empty) stats message so the fixture
+	// represents a fully-loaded dashboard, which is what most tests render.
+	settled, _ := got.Update(dashboardStatsLoadedMsg{})
+	return settled.(Model)
 }
 
 func TestUpdate_DashboardLoaded(t *testing.T) {
@@ -309,6 +337,77 @@ func TestDiffViewer_NavigatesFilesAndHunks(t *testing.T) {
 	}
 }
 
+func TestHandleKey_DiffCopyLineAndHunk(t *testing.T) {
+	m := loadedModel(t, &mockClient{})
+	m.screen = screenDiff
+	m.detail = &gitlab.MergeRequest{IID: 251}
+	m.diff = newDiffState([]*gitlab.MergeRequestDiff{{
+		Diff: strings.Join([]string{
+			"diff --git a/one.go b/one.go",
+			"--- a/one.go",
+			"+++ b/one.go",
+			"@@ -1 +1 @@",
+			"-old",
+			"+new",
+		}, "\n"),
+	}})
+	m.diff.lineOffset = 0
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	m = updated.(Model)
+	if cmd == nil {
+		t.Fatal("expected a copy command for 'y' on the diff screen")
+	}
+	msg := cmd()
+	status, ok := msg.(statusMsg)
+	if !ok || !strings.Contains(status.text, "Line copied") {
+		t.Fatalf("expected line-copied status, got %#v", msg)
+	}
+
+	updated, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("Y")})
+	m = updated.(Model)
+	if cmd == nil {
+		t.Fatal("expected a copy command for 'Y' on the diff screen")
+	}
+	msg = cmd()
+	status, ok = msg.(statusMsg)
+	if !ok || !strings.Contains(status.text, "Hunk copied") {
+		t.Fatalf("expected hunk-copied status, got %#v", msg)
+	}
+}
+
+func TestFinalizeDiffFile_TruncatesVeryLargeFiles(t *testing.T) {
+	lines := make([]string, maxDiffFileLines+100)
+	lines[0] = "diff --git a/big.txt b/big.txt"
+	for i := 1; i < len(lines); i++ {
+		lines[i] = fmt.Sprintf("+line %d", i)
+	}
+
+	files := parseRawGitDiff(strings.Join(lines, "\n"))
+	if len(files) != 1 {
+		t.Fatalf("len(files) = %d, want 1", len(files))
+	}
+	file := files[0]
+	if len(file.lines) != maxDiffFileLines+1 { // +1 for the truncation note
+		t.Errorf("len(file.lines) = %d, want %d", len(file.lines), maxDiffFileLines+1)
+	}
+	if !strings.Contains(file.lines[len(file.lines)-1], "truncated") {
+		t.Errorf("expected a truncation note as the last line, got %q", file.lines[len(file.lines)-1])
+	}
+	if file.additions != len(lines)-1 {
+		t.Errorf("additions = %d, want %d (stats should reflect the full diff, not the truncated view)", file.additions, len(lines)-1)
+	}
+	found := false
+	for _, f := range file.flags {
+		if f == "truncated" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected flags to include \"truncated\", got %v", file.flags)
+	}
+}
+
 func TestDiffViewer_SearchesAcrossFiles(t *testing.T) {
 	m := loadedModel(t, &mockClient{})
 	m.screen = screenDiff
@@ -508,6 +607,10 @@ func TestHandleKey_DiffWhitespaceToggle(t *testing.T) {
 
 func TestBuildSideBySideRows(t *testing.T) {
 	lines := []string{
+		"diff --git a/main.go b/main.go",
+		"--- a/main.go",
+		"+++ b/main.go",
+		"@@ -1,5 +1,5 @@",
 		" context1",
 		"-removed1",
 		"-removed2",
@@ -518,6 +621,7 @@ func TestBuildSideBySideRows(t *testing.T) {
 	}
 	rows := buildSideBySideRows(lines)
 	want := []sideBySideRow{
+		{span: "@@ -1,5 +1,5 @@"},
 		{left: " context1", right: " context1"},
 		{left: "-removed1", right: "+added1"},
 		{left: "-removed2", right: ""},
@@ -535,7 +639,7 @@ func TestHandleKey_DiffSideBySideToggle(t *testing.T) {
 	m.screen = screenDiff
 	m.detail = &gitlab.MergeRequest{IID: 251, Title: "Refactor helper"}
 	m.height = 20
-	m.width = 100
+	m.width = 180
 	m.diff = newDiffState([]*gitlab.MergeRequestDiff{{
 		Diff: strings.Join([]string{
 			"diff --git a/main.go b/main.go",
@@ -545,7 +649,7 @@ func TestHandleKey_DiffSideBySideToggle(t *testing.T) {
 		}, "\n"),
 	}})
 
-	if strings.Contains(m.View(), "side-by-side") {
+	if strings.Contains(m.View(), "[side-by-side]") {
 		t.Fatal("did not expect side-by-side marker before toggling")
 	}
 
@@ -561,6 +665,12 @@ func TestHandleKey_DiffSideBySideToggle(t *testing.T) {
 	}
 	if !strings.Contains(view, "return oldValue") || !strings.Contains(view, "return newValue") {
 		t.Errorf("View() should show both sides of the change\n%s", view)
+	}
+	if !strings.Contains(view, "OLD  main.go") || !strings.Contains(view, "NEW  main.go") {
+		t.Errorf("View() should show compact side-by-side headers\n%s", view)
+	}
+	if strings.Contains(view, "diff --git") {
+		t.Errorf("View() should not render git metadata inside side-by-side columns\n%s", view)
 	}
 
 	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("s")})
@@ -1131,6 +1241,110 @@ func TestLogState_ParsesTrace(t *testing.T) {
 	}
 }
 
+func TestLogState_TruncatesVeryLargeLogsButKeepsRawForSaving(t *testing.T) {
+	lines := make([]string, maxLogDisplayLines+50)
+	for i := range lines {
+		lines[i] = fmt.Sprintf("line %d", i)
+	}
+	raw := strings.Join(lines, "\n")
+
+	state := newLogState(&gitlab.Job{ID: 1}, raw)
+
+	if state.truncated != 50 {
+		t.Errorf("truncated = %d, want 50", state.truncated)
+	}
+	if len(state.lines) != maxLogDisplayLines {
+		t.Errorf("len(lines) = %d, want %d", len(state.lines), maxLogDisplayLines)
+	}
+	if state.lines[0] != "line 50" {
+		t.Errorf("first displayed line = %q, want the tail to be kept", state.lines[0])
+	}
+	if state.raw != raw {
+		t.Error("raw should keep the full untruncated trace for saving")
+	}
+}
+
+func TestLogState_CurrentLineText(t *testing.T) {
+	state := newLogState(&gitlab.Job{ID: 1}, "one\ntwo\nthree")
+	state.lineOffset = 1
+	if got := state.currentLineText(); got != "two" {
+		t.Errorf("currentLineText() = %q, want %q", got, "two")
+	}
+
+	state.search("three", 10)
+	if got := state.currentLineText(); got != "three" {
+		t.Errorf("currentLineText() with active search = %q, want %q", got, "three")
+	}
+}
+
+func TestJobLogFollow_TogglesOnAndOff(t *testing.T) {
+	m := loadedModel(t, &mockClient{})
+	m.screen = screenJobLog
+	m.jobLog = newLogState(&gitlab.Job{ID: 9, Status: gitlab.JobStatusRunning}, "log")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("f")})
+	got := updated.(Model)
+	if !got.jobLogFollowing {
+		t.Fatal("expected follow mode to turn on for a running job")
+	}
+	if cmd == nil {
+		t.Fatal("expected a follow tick command to be scheduled")
+	}
+
+	updated, cmd = got.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("f")})
+	got = updated.(Model)
+	if got.jobLogFollowing {
+		t.Error("expected follow mode to turn back off")
+	}
+	if cmd != nil {
+		t.Error("expected no command when turning follow mode off")
+	}
+}
+
+func TestJobLogFollow_RefusesForFinishedJob(t *testing.T) {
+	m := loadedModel(t, &mockClient{})
+	m.screen = screenJobLog
+	m.jobLog = newLogState(&gitlab.Job{ID: 9, Status: gitlab.JobStatusSuccess}, "log")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("f")})
+	if updated.(Model).jobLogFollowing {
+		t.Error("expected follow mode to refuse a job that already finished")
+	}
+	if cmd != nil {
+		t.Error("expected no command for a finished job")
+	}
+}
+
+func TestJobLogFollowTick_StaleGenerationIsNoop(t *testing.T) {
+	m := loadedModel(t, &mockClient{})
+	m.screen = screenJobLog
+	m.jobLogFollowing = true
+	m.jobLogPollGen = 2
+	m.jobLog = newLogState(&gitlab.Job{ID: 9, Status: gitlab.JobStatusRunning}, "log")
+
+	_, cmd := m.Update(jobLogFollowTickMsg{gen: 1})
+	if cmd != nil {
+		t.Error("expected a stale-generation follow tick to be dropped")
+	}
+}
+
+func TestJobLogLoaded_StopsFollowingWhenJobFinishes(t *testing.T) {
+	m := loadedModel(t, &mockClient{})
+	m.screen = screenJobLog
+	m.jobLogFollowing = true
+	m.jobLogPollGen = 1
+	m.jobLog = newLogState(&gitlab.Job{ID: 9, Status: gitlab.JobStatusRunning}, "log")
+
+	updated, cmd := m.Update(jobLogLoadedMsg{job: &gitlab.Job{ID: 9, Status: gitlab.JobStatusSuccess}, log: "log"})
+	got := updated.(Model)
+	if got.jobLogFollowing {
+		t.Error("expected follow mode to stop once the job reaches a terminal status")
+	}
+	if cmd != nil {
+		t.Error("expected no further poll command once follow mode stops")
+	}
+}
+
 func TestCurrentURL(t *testing.T) {
 	m := loadedModel(t, &mockClient{})
 	if got := m.currentURL(); got != "https://gitlab.services.betha.cloud/team/service/-/merge_requests/251" {
@@ -1148,7 +1362,10 @@ func TestView_Dashboard(t *testing.T) {
 	m := loadedModel(t, &mockClient{})
 	view := m.View()
 
-	for _, want := range []string{"empresa", "atendimento/protocolo/cadastros/api-protocolo-cadastros", "bugfix-PD-26527", "!251", "failed"} {
+	// The full project path only needs to appear once — the header already
+	// shows it (shortened to its last two segments); the body no longer
+	// repeats it, reclaiming those rows for the enriched MR card (D6).
+	for _, want := range []string{"empresa", "cadastros/api-protocolo-cadastros", "bugfix-PD-26527", "!251", "failed"} {
 		if !strings.Contains(view, want) {
 			t.Errorf("View() missing %q\n%s", want, view)
 		}
@@ -1165,10 +1382,54 @@ func TestView_List(t *testing.T) {
 	m.cursor = 1
 
 	view := m.View()
-	for _, want := range []string{"!1", "First MR", "!2", "Second MR, in draft", "(draft)", "> "} {
+	for _, want := range []string{"!1", "First MR", "!2", "Second MR, in draft", "DRAFT", cursorMarker} {
 		if !strings.Contains(view, want) {
 			t.Errorf("View() (list) missing %q\n%s", want, view)
 		}
+	}
+}
+
+func TestApplyTheme_OpenCodeThemes(t *testing.T) {
+	dark := lipgloss.HasDarkBackground()
+	lipgloss.SetHasDarkBackground(true)
+	t.Cleanup(func() {
+		lipgloss.SetHasDarkBackground(dark)
+		applyTheme("dark")
+	})
+
+	applyTheme("tokyo-night")
+	if palette.accent != lipgloss.Color("#7aa2f7") {
+		t.Fatalf("tokyo-night accent = %v, want #7aa2f7", palette.accent)
+	}
+
+	applyTheme("catppuccin")
+	if palette.secondary != lipgloss.Color("#f38ba8") {
+		t.Fatalf("catppuccin secondary = %v, want #f38ba8", palette.secondary)
+	}
+}
+
+func TestApplyTheme_DarkUsesAdaptiveOCTheme(t *testing.T) {
+	dark := lipgloss.HasDarkBackground()
+	lipgloss.SetHasDarkBackground(true)
+	t.Cleanup(func() { lipgloss.SetHasDarkBackground(dark) })
+
+	applyTheme("dark")
+	oc := ocByID[defaultAdaptiveTheme]
+	if palette.accent != lipgloss.Color(oc.dark.primary) {
+		t.Fatalf("dark accent = %v, want %v (adaptive %s theme)", palette.accent, oc.dark.primary, defaultAdaptiveTheme)
+	}
+}
+
+func TestApplyTheme_TerminalIsExplicitCRTPalette(t *testing.T) {
+	applyTheme("terminal")
+	if palette.accent != lipgloss.Color("#00ff66") {
+		t.Fatalf("terminal accent = %v, want #00ff66", palette.accent)
+	}
+
+	retroPalette := palette
+	applyTheme("crt")
+	if palette != retroPalette {
+		t.Fatalf("crt palette = %+v, want %+v", palette, retroPalette)
 	}
 }
 
@@ -1179,6 +1440,36 @@ func TestView_List_Empty(t *testing.T) {
 
 	if view := m.View(); !strings.Contains(view, "No open merge requests") {
 		t.Errorf("View() (empty list) = %q, want the empty-state message", view)
+	}
+}
+
+func TestHandleKey_SidebarNavigationFallbackOnEmptyList(t *testing.T) {
+	m := loadedModel(t, &mockClient{})
+	m.screen = screenList
+	m.mrs = nil
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	m = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("expected no command while selecting sidebar item, got %T", cmd)
+	}
+	if !m.navActive {
+		t.Fatal("expected sidebar navigation to become active")
+	}
+	if m.navCursor != 0 {
+		t.Fatalf("navCursor = %d, want Dashboard index 0", m.navCursor)
+	}
+
+	updated, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	if cmd != nil {
+		t.Fatalf("expected no command when opening dashboard, got %T", cmd)
+	}
+	if m.screen != screenDashboard {
+		t.Fatalf("screen = %v, want screenDashboard", m.screen)
+	}
+	if m.navActive {
+		t.Fatal("expected sidebar navigation to close after activation")
 	}
 }
 
@@ -1273,7 +1564,7 @@ func TestHandleKey_DiscussionsViewer(t *testing.T) {
 	m.width = 100
 
 	m.deps.RunGLab = func(ctx context.Context, dir string, args ...string) ([]byte, error) {
-		wantArgs := []string{"api", "projects/:id/merge_requests/251/discussions?per_page=100"}
+		wantArgs := []string{"api", "projects/:id/merge_requests/251/discussions?per_page=100", "--paginate"}
 		if !reflect.DeepEqual(args, wantArgs) {
 			t.Errorf("glab args = %#v, want %#v", args, wantArgs)
 		}
@@ -1392,7 +1683,7 @@ func TestDiscussionView_FiltersSystemNotesAndMarksResolved(t *testing.T) {
 		{ID: "plain", Notes: []gitlab.Note{{Author: "author", Body: "thanks"}}},
 	}
 
-	lines, threads := discussionView(discussions)
+	lines, threads := discussionView(discussions, 100)
 
 	if len(threads) != 3 {
 		t.Fatalf("len(threads) = %d, want 3 (the system-only thread should be filtered)", len(threads))
@@ -1430,7 +1721,7 @@ func TestHandleKey_ResolveThread(t *testing.T) {
 	m.width = 100
 	m.discuss = newDiscussState([]gitlab.Discussion{
 		{ID: "abc", Notes: []gitlab.Note{{Author: "reviewer", Body: "please fix", Resolvable: true, Resolved: false}}},
-	})
+	}, 100)
 
 	var gotArgs []string
 	m.deps.RunGLab = func(ctx context.Context, dir string, args ...string) ([]byte, error) {
@@ -1453,13 +1744,74 @@ func TestHandleKey_ResolveThread(t *testing.T) {
 	}
 }
 
+func TestHandleKey_ReplyToThread(t *testing.T) {
+	m := loadedModel(t, &mockClient{})
+	m.screen = screenDiscussions
+	m.detail = &gitlab.MergeRequest{IID: 251}
+	m.discuss = newDiscussState([]gitlab.Discussion{
+		{ID: "abc", Notes: []gitlab.Note{{Author: "reviewer", Body: "please fix"}}},
+	}, 100)
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("R")})
+	m = updated.(Model)
+	if cmd != nil {
+		t.Fatal("expected no immediate command, reply just opens the composer")
+	}
+	if !m.commentActive || m.commentReplyID != "abc" {
+		t.Fatalf("expected composer open for reply to thread %q, got active=%v replyID=%q", "abc", m.commentActive, m.commentReplyID)
+	}
+
+	var gotArgs []string
+	m.deps.RunGLab = func(ctx context.Context, dir string, args ...string) ([]byte, error) {
+		gotArgs = args
+		return []byte(`{}`), nil
+	}
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("ok")})
+	m = updated.(Model)
+	updated, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	if cmd == nil {
+		t.Fatal("expected replyDiscussionCmd")
+	}
+	if _, ok := cmd().(commentPostedMsg); !ok {
+		t.Fatalf("expected commentPostedMsg, got %#v", cmd())
+	}
+	wantArgs := []string{"api", "--method", "POST", "projects/:id/merge_requests/251/discussions/abc/notes", "--field", "body=ok"}
+	if !reflect.DeepEqual(gotArgs, wantArgs) {
+		t.Fatalf("glab args = %#v, want %#v", gotArgs, wantArgs)
+	}
+	if m.commentReplyID != "" {
+		t.Error("expected commentReplyID to reset after submitting")
+	}
+}
+
+func TestHandleCommentKey_AltEnterInsertsNewline(t *testing.T) {
+	m := loadedModel(t, &mockClient{})
+	m.commentActive = true
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("a")})
+	m = updated.(Model)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter, Alt: true})
+	m = updated.(Model)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("b")})
+	m = updated.(Model)
+
+	if m.commentInput != "a\nb" {
+		t.Fatalf("commentInput = %q, want %q", m.commentInput, "a\\nb")
+	}
+	if !m.commentActive {
+		t.Error("expected composer to stay open after alt+enter")
+	}
+}
+
 func TestHandleKey_ResolveThread_PlainCommentNoop(t *testing.T) {
 	m := loadedModel(t, &mockClient{})
 	m.screen = screenDiscussions
 	m.detail = &gitlab.MergeRequest{IID: 251}
 	m.discuss = newDiscussState([]gitlab.Discussion{
 		{ID: "abc", Notes: []gitlab.Note{{Author: "author", Body: "just a comment"}}},
-	})
+	}, 100)
 
 	called := false
 	m.deps.RunGLab = func(ctx context.Context, dir string, args ...string) ([]byte, error) {
@@ -1488,7 +1840,7 @@ func TestMRSummary(t *testing.T) {
 		WebURL:       "https://gitlab.services.betha.cloud/team/service/-/merge_requests/251",
 	}
 
-	got := mrSummary(mr, "namespace/project")
+	got := mrSummary(mr, "namespace/project", summaryFormatPlain, summaryExtras{})
 	for _, want := range []string{
 		"!251 Alinha ao commons",
 		"namespace/project",
@@ -1508,7 +1860,7 @@ func TestMRSummary(t *testing.T) {
 
 func TestMRSummary_OmitsEmptyFields(t *testing.T) {
 	mr := &gitlab.MergeRequest{IID: 7, Title: "Minimal", SourceBranch: "a", TargetBranch: "b"}
-	got := mrSummary(mr, "")
+	got := mrSummary(mr, "", summaryFormatPlain, summaryExtras{})
 	for _, absent := range []string{"Project:", "Author:", "Pipeline:", "Approvals:", "Conflicts:"} {
 		if strings.Contains(got, absent) {
 			t.Errorf("mrSummary should omit %q for an empty field\n%s", absent, got)
@@ -1552,6 +1904,32 @@ func TestRecordHistory_WritesProjectAndBranch(t *testing.T) {
 	}
 }
 
+// firstBatchedMsg runs cmd and, if it's a tea.BatchMsg (dashboardLoadedMsg now
+// fans out to both a history-recording command and a best-effort dashboard
+// stats command via tea.Batch), returns the first sub-command's result whose
+// type matches T.
+func firstBatchedMsg[T any](t *testing.T, cmd tea.Cmd) (T, bool) {
+	t.Helper()
+	var zero T
+	if cmd == nil {
+		return zero, false
+	}
+	msg := cmd()
+	if batch, ok := msg.(tea.BatchMsg); ok {
+		for _, sub := range batch {
+			if sub == nil {
+				continue
+			}
+			if v, ok := firstBatchedMsg[T](t, sub); ok {
+				return v, true
+			}
+		}
+		return zero, false
+	}
+	v, ok := msg.(T)
+	return v, ok
+}
+
 func TestUpdate_DashboardLoaded_RecordsHistoryWhenConfigured(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "history.json")
 	m := New(Deps{
@@ -1564,9 +1942,9 @@ func TestUpdate_DashboardLoaded_RecordsHistoryWhenConfigured(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("expected a record-history command when HistoryPath is set")
 	}
-	loaded, ok := cmd().(historyLoadedMsg)
+	loaded, ok := firstBatchedMsg[historyLoadedMsg](t, cmd)
 	if !ok {
-		t.Fatalf("expected historyLoadedMsg, got %T", cmd())
+		t.Fatal("expected a historyLoadedMsg among the batched dashboard-load commands")
 	}
 	if len(loaded.branches) != 1 || loaded.branches[0].MRIID != 251 {
 		t.Errorf("recorded branches = %+v", loaded.branches)
@@ -1590,8 +1968,281 @@ func TestUpdate_DashboardLoaded_RecordsHistoryWhenConfigured(t *testing.T) {
 
 func TestUpdate_DashboardLoaded_NoHistoryPathIsNoop(t *testing.T) {
 	m := New(Deps{NewClient: func(config.Profile) (gitlab.Client, error) { return &mockClient{}, nil }})
-	if _, cmd := m.Update(dashboardLoadedMsg{ctx: testDashContext()}); cmd != nil {
-		t.Fatalf("expected no history command without a HistoryPath, got %T", cmd())
+	_, cmd := m.Update(dashboardLoadedMsg{ctx: testDashContext()})
+	// The dashboard-stats command still fires regardless of HistoryPath (it's
+	// independent, best-effort enrichment) — what must be absent is any
+	// history-recording command.
+	if _, ok := firstBatchedMsg[historyLoadedMsg](t, cmd); ok {
+		t.Fatal("expected no history-recording command without a HistoryPath")
+	}
+}
+
+func TestUpdate_DashboardStatsLoaded_PopulatesModelAndRenders(t *testing.T) {
+	client := &mockClient{
+		user:    &gitlab.User{Username: "arturo", Name: "Arturo Burigo"},
+		commits: []gitlab.Commit{{ShortID: "abc1234", Title: "Fix retry logic", AuthorName: "Arturo Burigo", CreatedAt: time.Now()}},
+		mrs: []*gitlab.MergeRequest{
+			{IID: 1, State: gitlab.MergeRequestStateOpened},
+			{IID: 2, State: gitlab.MergeRequestStateMerged},
+			{IID: 3, State: gitlab.MergeRequestStateMerged},
+		},
+		assignedMRs: []*gitlab.MergeRequest{
+			{IID: 42, Title: "Bump dependency", ProjectPath: "team/other-service", UpdatedAt: time.Now()},
+		},
+		activity: []gitlab.ContributionEvent{
+			{Action: "opened", Target: "!101 Adjust invoice validation", CreatedAt: time.Now()},
+		},
+	}
+	m := loadedModel(t, client)
+
+	cmd := loadDashboardStatsCmd(m.client, m.dash)
+	if cmd == nil {
+		t.Fatal("expected a dashboard-stats command")
+	}
+	msg, ok := cmd().(dashboardStatsLoadedMsg)
+	if !ok {
+		t.Fatalf("expected dashboardStatsLoadedMsg, got %T", cmd())
+	}
+
+	updated, _ := m.Update(msg)
+	m = updated.(Model)
+	if len(m.dashCommits) != 1 || m.dashCommits[0].ShortID != "abc1234" {
+		t.Errorf("dashCommits = %+v", m.dashCommits)
+	}
+	if len(m.dashMRs) != 3 {
+		t.Errorf("dashMRs = %+v, want 3", m.dashMRs)
+	}
+	if len(m.dashAssignedMRs) != 1 || m.dashAssignedMRs[0].IID != 42 {
+		t.Errorf("dashAssignedMRs = %+v", m.dashAssignedMRs)
+	}
+	if len(m.dashActivity) != 1 {
+		t.Errorf("dashActivity = %+v, want 1", m.dashActivity)
+	}
+
+	view := m.View()
+	for _, want := range []string{
+		"Your recent commits", "abc1234", "Your merge requests", "opened", "merged",
+		"Assigned to you", "team/other-service", "Bump dependency",
+		"Contribution activity", time.Now().Format("January"), "1 total",
+	} {
+		if !strings.Contains(view, want) {
+			t.Errorf("View() missing %q\n%s", want, view)
+		}
+	}
+}
+
+func TestActivityHeatLevel_ScalesRelativeToBusiestDay(t *testing.T) {
+	// A heavily-commenting day (60) shouldn't flatten a lighter one (5) to
+	// the same top level the way a fixed "6+" cutoff would.
+	const max = 60
+	cases := map[int]int{0: 0, 5: 1, 15: 1, 30: 2, 45: 3, 60: 4}
+	for count, want := range cases {
+		if got := activityHeatLevel(count, max); got != want {
+			t.Errorf("activityHeatLevel(%d, %d) = %d, want %d", count, max, got, want)
+		}
+	}
+}
+
+func TestActivityMonthStats(t *testing.T) {
+	counts := map[int]int{1: 4, 2: 18, 3: 6} // today = 3: active streak of 3 days
+	total, peakDay, peakCount, streak := activityMonthStats(counts, 3)
+	if total != 28 || peakDay != 2 || peakCount != 18 || streak != 3 {
+		t.Errorf("stats = (total %d, peak %d on day %d, streak %d), want (28, 18 on 2, 3)",
+			total, peakCount, peakDay, streak)
+	}
+}
+
+func TestActivityMonthStats_QuietTodayFallsBackToYesterday(t *testing.T) {
+	// Nothing yet today (day 4) — the streak through yesterday still counts;
+	// a quiet morning isn't a broken streak.
+	counts := map[int]int{2: 3, 3: 5}
+	_, _, _, streak := activityMonthStats(counts, 4)
+	if streak != 2 {
+		t.Errorf("streak = %d, want 2 (days 2-3, today still in progress)", streak)
+	}
+}
+
+func TestActivityMonthStats_Empty(t *testing.T) {
+	total, peakDay, peakCount, streak := activityMonthStats(map[int]int{}, 15)
+	if total != 0 || peakDay != 0 || peakCount != 0 || streak != 0 {
+		t.Errorf("stats on empty month = (%d, %d, %d, %d), want all zero",
+			total, peakDay, peakCount, streak)
+	}
+}
+
+func TestActivityHeatLevel_ZeroMaxIsLevelZero(t *testing.T) {
+	if got := activityHeatLevel(0, 0); got != 0 {
+		t.Errorf("activityHeatLevel(0, 0) = %d, want 0", got)
+	}
+	if got := activityHeatLevel(5, 0); got != 0 {
+		t.Errorf("activityHeatLevel(5, 0) = %d, want 0 (no busiest day to scale against)", got)
+	}
+}
+
+func TestActivityLevelColor_SpansThemeSubtleToGood(t *testing.T) {
+	if got := activityLevelColor(0); got != palette.subtle {
+		t.Errorf("activityLevelColor(0) = %v, want palette.subtle %v", got, palette.subtle)
+	}
+	if got := activityLevelColor(4); got != palette.good {
+		t.Errorf("activityLevelColor(4) = %v, want palette.good %v", got, palette.good)
+	}
+}
+
+func TestRenderContributionCalendar_CountsCurrentMonthOnly(t *testing.T) {
+	m := loadedModel(t, &mockClient{})
+	now := time.Now()
+	monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
+	m.dashActivity = []gitlab.ContributionEvent{
+		{Action: "opened", CreatedAt: now},
+		{Action: "commented on", CreatedAt: monthStart},             // the 1st, in-window
+		{Action: "closed", CreatedAt: monthStart.AddDate(0, 0, -1)}, // last day of previous month, dropped
+		{Action: "merged", CreatedAt: monthStart.AddDate(0, -1, 0)}, // a month earlier, dropped
+	}
+
+	view := m.View()
+	if !strings.Contains(view, "Contribution activity") {
+		t.Fatalf("View() missing contribution calendar header\n%s", view)
+	}
+	if !strings.Contains(view, now.Format("January")) {
+		t.Errorf("View() should name the current month %q\n%s", now.Format("January"), view)
+	}
+	if !strings.Contains(view, "2 total") {
+		t.Errorf("View() should count only the 2 current-month events\n%s", view)
+	}
+}
+
+func TestDashboardLoadsAsOne(t *testing.T) {
+	// "Load as one": the dashboard stays behind the spinner until BOTH phases
+	// arrive — the context alone (phase 1) must not reveal it, only the stats
+	// (phase 2) do — so the screen paints at once instead of popping in.
+	m := New(Deps{NewClient: func(config.Profile) (gitlab.Client, error) { return &mockClient{}, nil }})
+	if !m.dashLoading {
+		t.Fatal("expected dashLoading=true from New")
+	}
+	afterCtx, _ := m.Update(dashboardLoadedMsg{ctx: testDashContext()})
+	m = afterCtx.(Model)
+	if !m.dashLoading {
+		t.Error("expected dashLoading to stay true after dashboardLoadedMsg (stats still pending)")
+	}
+	if !strings.Contains(m.View(), "Loading") {
+		t.Errorf("expected the spinner view while stats load, got %q", m.View())
+	}
+	afterStats, _ := m.Update(dashboardStatsLoadedMsg{})
+	if afterStats.(Model).dashLoading {
+		t.Error("expected dashLoading=false after dashboardStatsLoadedMsg")
+	}
+}
+
+func TestSpinnerTickAdvancesOnlyWhileLoading(t *testing.T) {
+	m := New(Deps{})
+	m.dashLoading = true
+	m.spinnerGen = 3
+
+	advanced, cmd := m.Update(spinnerTickMsg{gen: 3})
+	if got := advanced.(Model).spinnerFrame; got != 1 {
+		t.Errorf("spinnerFrame = %d, want 1 after a matching tick", got)
+	}
+	if cmd == nil {
+		t.Error("expected a follow-up tick while still loading")
+	}
+
+	// A stale-generation tick (from a superseded refresh) is a no-op.
+	if stale, staleCmd := m.Update(spinnerTickMsg{gen: 2}); stale.(Model).spinnerFrame != 0 || staleCmd != nil {
+		t.Error("stale-gen tick should neither advance the frame nor reschedule")
+	}
+
+	// Once loading is done, the tick stops rescheduling itself.
+	m.dashLoading = false
+	if done, doneCmd := m.Update(spinnerTickMsg{gen: 3}); done.(Model).spinnerFrame != 0 || doneCmd != nil {
+		t.Error("tick after loading finished should stop")
+	}
+}
+
+func TestRenderActivityFeed_ShowsRecentActionsBesideStrip(t *testing.T) {
+	m := loadedModel(t, &mockClient{})
+	now := time.Now()
+	m.dashActivity = []gitlab.ContributionEvent{
+		{Action: "merged", Target: "PD-26112 group tasks", CreatedAt: now},
+		{Action: "commented on", Target: "EX-9231 layout", CreatedAt: now.AddDate(0, 0, -1)},
+		{Action: "pushed to", Target: "feature-PD-26112", CreatedAt: now.AddDate(0, 0, -2)},
+	}
+
+	view := m.View()
+	for _, want := range []string{"Recent activity", "merged", "comment", "pushed", "PD-26112 group tasks"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("View() missing %q from the activity feed\n%s", want, view)
+		}
+	}
+}
+
+func TestActivityVerb(t *testing.T) {
+	cases := map[string]string{
+		"opened":       "opened",
+		"closed":       "closed",
+		"merged":       "merged",
+		"accepted":     "merged",
+		"commented on": "comment",
+		"pushed to":    "pushed",
+		"pushed new":   "pushed",
+		"approved":     "approved",
+	}
+	for action, want := range cases {
+		if got := activityVerb(action); got != want {
+			t.Errorf("activityVerb(%q) = %q, want %q", action, got, want)
+		}
+	}
+}
+
+func TestLoadDashboardStatsCmd_FetchesOpenAssignedMRsAcrossProjects(t *testing.T) {
+	client := &mockClient{
+		assignedMRs: []*gitlab.MergeRequest{{IID: 7, State: gitlab.MergeRequestStateOpened}},
+	}
+	cmd := loadDashboardStatsCmd(client, testDashContext())
+	msg, ok := cmd().(dashboardStatsLoadedMsg)
+	if !ok {
+		t.Fatalf("expected dashboardStatsLoadedMsg, got %T", cmd())
+	}
+	if len(msg.assignedMRs) != 1 || msg.assignedMRs[0].IID != 7 {
+		t.Errorf("assignedMRs = %+v, want the mock's single assigned MR", msg.assignedMRs)
+	}
+}
+
+func TestLoadDashboardStatsCmd_ScopesActivityToCurrentMonth(t *testing.T) {
+	client := &mockClient{
+		activity: []gitlab.ContributionEvent{{Action: "opened"}},
+	}
+	cmd := loadDashboardStatsCmd(client, testDashContext())
+	msg, ok := cmd().(dashboardStatsLoadedMsg)
+	if !ok {
+		t.Fatalf("expected dashboardStatsLoadedMsg, got %T", cmd())
+	}
+	if len(msg.activity) != 1 {
+		t.Errorf("activity = %+v, want the mock's single event", msg.activity)
+	}
+
+	// After is the day before the 1st, so the 1st's own contributions (After
+	// is date-exclusive) are still included.
+	after := client.lastActivityOpts.After
+	wantAfter := currentMonthStart(time.Now()).AddDate(0, 0, -1)
+	if after.IsZero() || !after.Equal(wantAfter) {
+		t.Errorf("After = %v, want %v (day before the current month's 1st)", after, wantAfter)
+	}
+}
+
+func TestLoadDashboardStatsCmd_NoCurrentUserSkipsCommitsButStillFetchesMRs(t *testing.T) {
+	client := &mockClient{
+		mrs: []*gitlab.MergeRequest{{IID: 1, State: gitlab.MergeRequestStateOpened}},
+	}
+	cmd := loadDashboardStatsCmd(client, testDashContext())
+	msg, ok := cmd().(dashboardStatsLoadedMsg)
+	if !ok {
+		t.Fatalf("expected dashboardStatsLoadedMsg, got %T", cmd())
+	}
+	if msg.commits != nil {
+		t.Errorf("commits = %+v, want nil when CurrentUser is unavailable", msg.commits)
+	}
+	if len(msg.mrs) != 1 {
+		t.Errorf("mrs = %+v, want 1 (MR fetch shouldn't depend on CurrentUser)", msg.mrs)
 	}
 }
 
@@ -1696,6 +2347,9 @@ func TestHandleKey_HelpOverlay(t *testing.T) {
 	if !strings.Contains(view, "Keybindings") {
 		t.Errorf("help view missing 'Keybindings'\n%s", view)
 	}
+	if !strings.Contains(view, "MR !251") {
+		t.Errorf("help overlay should preserve the current screen context\n%s", view)
+	}
 	for _, want := range []string{"approve", "merge", "comments"} {
 		if !strings.Contains(view, want) {
 			t.Errorf("help view missing the detail binding %q\n%s", want, view)
@@ -1731,6 +2385,67 @@ func TestHelpOverlay_DoesNotInterceptCommentInput(t *testing.T) {
 	}
 	if m.commentInput != "?" {
 		t.Errorf("commentInput = %q, want ?", m.commentInput)
+	}
+}
+
+func TestView_ConfirmOverlay(t *testing.T) {
+	m := loadedModel(t, &mockClient{})
+	m.screen = screenDetail
+	m.detail = &gitlab.MergeRequest{IID: 251, Title: "x"}
+	m.confirmActive = true
+	m.confirmPrompt = "Merge !251 into main?"
+
+	view := m.View()
+	for _, want := range []string{"MR !251", "Confirm", "Merge !251 into main?", "enter/y"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("confirm overlay missing %q\n%s", want, view)
+		}
+	}
+	if strings.Contains(view, "[y]es / [n]o") {
+		t.Errorf("confirm prompt should not be rendered in the footer anymore\n%s", view)
+	}
+}
+
+func TestHandleKey_CommandPaletteExecutesFilteredCommand(t *testing.T) {
+	m := loadedModel(t, &mockClient{})
+	m.screen = screenDetail
+	m.detail = &gitlab.MergeRequest{IID: 251, Title: "x"}
+	var gotArgs []string
+	m.deps.RunGLab = func(ctx context.Context, dir string, args ...string) ([]byte, error) {
+		gotArgs = args
+		return []byte("diff --git a/main.go b/main.go\n@@ -1 +1 @@\n-old\n+new\n"), nil
+	}
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlK})
+	m = updated.(Model)
+	if !m.commandPaletteActive {
+		t.Fatal("expected ctrl+k to open the command palette")
+	}
+	view := m.View()
+	for _, want := range []string{"Command Palette", "Open diff", "MR !251"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("command palette view missing %q\n%s", want, view)
+		}
+	}
+
+	for _, r := range "diff" {
+		updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		m = updated.(Model)
+	}
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	if m.commandPaletteActive {
+		t.Fatal("expected enter to close the command palette")
+	}
+	if cmd == nil {
+		t.Fatal("expected the filtered diff command to run")
+	}
+	if _, ok := cmd().(mrDiffLoadedMsg); !ok {
+		t.Fatalf("expected mrDiffLoadedMsg, got %T", cmd())
+	}
+	wantArgs := []string{"mr", "diff", "251", "--color=never"}
+	if !reflect.DeepEqual(gotArgs, wantArgs) {
+		t.Fatalf("glab args = %#v, want %#v", gotArgs, wantArgs)
 	}
 }
 
@@ -1807,5 +2522,56 @@ func TestView_Error(t *testing.T) {
 	view := updated.(Model).View()
 	if !strings.Contains(view, "token expired") {
 		t.Errorf("View() = %q, want it to mention the error", view)
+	}
+}
+
+func TestPipelineLoaded_ActivePipelineSchedulesPoll(t *testing.T) {
+	m := loadedModel(t, &mockClient{})
+	m.detail = &gitlab.MergeRequest{IID: 251, Pipeline: &gitlab.Pipeline{ID: 1}}
+
+	// cmd is a tea.Tick command — invoking it would really sleep for
+	// pipelinePollInterval, so this only checks that one was scheduled;
+	// the gen-comparison logic itself is covered by the tests below.
+	updated, cmd := m.Update(pipelineLoadedMsg{pipeline: &gitlab.Pipeline{ID: 1, Status: gitlab.PipelineStatusRunning}})
+	got := updated.(Model)
+	if got.pollGen != 1 {
+		t.Errorf("pollGen = %d, want 1", got.pollGen)
+	}
+	if cmd == nil {
+		t.Fatal("expected a poll tick command for a running pipeline")
+	}
+}
+
+func TestPipelineLoaded_TerminalPipelineDoesNotPoll(t *testing.T) {
+	m := loadedModel(t, &mockClient{})
+	_, cmd := m.Update(pipelineLoadedMsg{pipeline: &gitlab.Pipeline{ID: 1, Status: gitlab.PipelineStatusSuccess}})
+	if cmd != nil {
+		t.Error("expected no poll command for a terminal pipeline status")
+	}
+}
+
+func TestPipelinePollTick_StaleGenerationIsNoop(t *testing.T) {
+	m := loadedModel(t, &mockClient{})
+	m.screen = screenPipeline
+	m.pollGen = 2
+	m.pipeline = &gitlab.Pipeline{ID: 1, Status: gitlab.PipelineStatusRunning}
+	m.detail = &gitlab.MergeRequest{IID: 251, Pipeline: &gitlab.Pipeline{ID: 1}}
+
+	_, cmd := m.Update(pipelinePollTickMsg{gen: 1})
+	if cmd != nil {
+		t.Error("expected a stale-generation tick to be dropped")
+	}
+}
+
+func TestPipelinePollTick_WrongScreenIsNoop(t *testing.T) {
+	m := loadedModel(t, &mockClient{})
+	m.screen = screenDetail
+	m.pollGen = 1
+	m.pipeline = &gitlab.Pipeline{ID: 1, Status: gitlab.PipelineStatusRunning}
+	m.detail = &gitlab.MergeRequest{IID: 251, Pipeline: &gitlab.Pipeline{ID: 1}}
+
+	_, cmd := m.Update(pipelinePollTickMsg{gen: 1})
+	if cmd != nil {
+		t.Error("expected a tick to be dropped once the user has left the pipeline screen")
 	}
 }

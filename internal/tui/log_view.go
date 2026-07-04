@@ -5,15 +5,27 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/arturoburigo/gitlab-tui/internal/gitlab"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
+
+	"github.com/arturoburigo/gzlab/internal/gitlab"
 )
 
 var errorLinePattern = regexp.MustCompile(`(?i)\b(error|fail(ed|ure)?|fatal|exception|panic|traceback)\b`)
 
+// maxLogDisplayLines caps how many lines the log viewer keeps in memory for
+// rendering/search — very large logs (Épico 15) keep only the tail, where
+// failures usually are. Saving to a file still writes the full raw trace.
+const maxLogDisplayLines = 20000
+
 type logState struct {
 	job     *gitlab.Job
+	raw     string // full untruncated trace, for "save to file"
 	lines   []string
 	isError []bool
+	// truncated is how many leading lines were dropped from lines to stay
+	// under maxLogDisplayLines; 0 means nothing was dropped.
+	truncated int
 
 	lineOffset int
 
@@ -30,7 +42,14 @@ func newLogState(job *gitlab.Job, raw string) logState {
 	if len(lines) == 0 {
 		lines = []string{"No log output for this job."}
 	}
-	state := logState{job: job, lines: lines, isError: make([]bool, len(lines)), errorCursor: -1}
+
+	state := logState{job: job, raw: raw, errorCursor: -1}
+	if len(lines) > maxLogDisplayLines {
+		state.truncated = len(lines) - maxLogDisplayLines
+		lines = lines[state.truncated:]
+	}
+	state.lines = lines
+	state.isError = make([]bool, len(lines))
 	for i, line := range lines {
 		if errorLinePattern.MatchString(line) {
 			state.isError[i] = true
@@ -41,11 +60,15 @@ func newLogState(job *gitlab.Job, raw string) logState {
 }
 
 // splitLogLines cleans a raw GitLab CI trace into displayable lines: ANSI
-// escape codes are stripped (the TUI applies its own styling) and both "\r"
-// and "\n" are treated as line breaks, since GitLab uses "\r" to overwrite
-// progress-style output (npm/docker pulls) the same way a real terminal would.
+// escape codes — including private CSI markers and OSC title/hyperlink
+// sequences a plain "\x1b\[...[a-zA-Z]" regex misses — are stripped (the TUI
+// applies its own styling), tabs are expanded (Go panics and Makefile output
+// are full of them and lipgloss.Width counts a tab as 0 columns), and both
+// "\r" and "\n" are treated as line breaks, since GitLab uses "\r" to
+// overwrite progress-style output (npm/docker pulls) like a real terminal.
 func splitLogLines(raw string) []string {
-	raw = ansiEscapePattern.ReplaceAllString(raw, "")
+	raw = ansi.Strip(raw)
+	raw = strings.ReplaceAll(raw, "\t", "    ")
 	raw = strings.TrimRight(raw, "\r\n")
 	if raw == "" {
 		return nil
@@ -57,54 +80,118 @@ func splitLogLines(raw string) []string {
 		if sectionMarkerPattern.MatchString(line) {
 			continue
 		}
-		lines = append(lines, line)
+		lines = append(lines, stripC0(line))
 	}
 	return lines
 }
 
-var (
-	ansiEscapePattern    = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
-	sectionMarkerPattern = regexp.MustCompile(`^section_(start|end):\d+:\S+$`)
-)
+// stripC0 drops remaining C0 control bytes (stray BEL, backspace, ...) that
+// ansi.Strip leaves alone because they're not part of an escape sequence —
+// left in, they render as garbage or ring the terminal bell.
+func stripC0(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 {
+			return -1
+		}
+		return r
+	}, s)
+}
+
+var sectionMarkerPattern = regexp.MustCompile(`^section_(start|end):\d+:\S+$`)
 
 func (m Model) renderJobLog() string {
 	height := m.logBodyHeight()
+	width := m.contentWidth()
 
 	title := "Job Log"
 	if m.jobLog.job != nil {
 		title = fmt.Sprintf("Log: %s (#%d)", m.jobLog.job.Name, m.jobLog.job.ID)
 	}
+	if m.jobLogFollowing {
+		title += "  " + footerStyle.Render(refreshTag("following", m.lastJobLogFetch))
+	}
 
 	var b strings.Builder
 	b.WriteString(titleStyle.Render(title) + "\n")
-	b.WriteString(ruleStyle.Render(strings.Repeat("─", 72)) + "\n")
+	b.WriteString(rule(width) + "\n")
+	if m.jobLog.truncated > 0 {
+		b.WriteString(footerStyle.Render(fmt.Sprintf("… %d earlier lines omitted for display; press 's' to save the full log …", m.jobLog.truncated)) + "\n")
+	}
 
-	lines := m.jobLog.lines
-	start := min(m.jobLog.lineOffset, max(0, len(lines)-1))
-	end := min(start+height, len(lines))
-	for i := start; i < end; i++ {
-		active := m.jobLog.isActiveMatch(i)
-		b.WriteString(renderLogLine(lines[i], m.jobLog.isError[i], active) + "\n")
+	rows, _ := m.logVisibleLines(m.jobLog.lineOffset, height, width)
+	for _, row := range rows {
+		b.WriteString(row + "\n")
 	}
 	return b.String()
 }
 
-func renderLogLine(line string, isError, active bool) string {
-	switch {
-	case active:
-		return searchStyle.Render(line)
-	case isError:
-		return errorStyle.Render(line)
-	default:
-		return line
+// logVisibleLines renders the job log body starting at startOffset,
+// soft-wrapping long lines instead of chopping them, and stops once height
+// visual rows are used. It returns the rendered rows and the index just past
+// the last source line consumed, so callers can report an accurate position
+// (a wrapped line takes more than one row, so "start+height" would overcount).
+func (m Model) logVisibleLines(startOffset, height, width int) ([]string, int) {
+	lines := m.jobLog.lines
+	start := min(startOffset, max(0, len(lines)-1))
+	var out []string
+	rows := 0
+	i := start
+	for ; i < len(lines) && rows < height; i++ {
+		active := m.jobLog.isActiveMatch(i)
+		styled := renderLogLine(lines[i], m.jobLog.isError[i], active, m.jobLog.searchQuery, width)
+		for _, wrapped := range strings.Split(styled, "\n") {
+			if rows >= height {
+				break
+			}
+			out = append(out, wrapped)
+			rows++
+		}
 	}
+	return out, i
+}
+
+// renderLogLine styles a line (error lines in errorStyle; a search match gets
+// only its matched span highlighted — active in full searchStyle, other
+// visible matches dimmer — instead of the whole line being painted over) and
+// soft-wraps it to width instead of chopping it, so the tail (where the
+// actual error message usually lives) stays reachable.
+func renderLogLine(line string, isError, active bool, query string, width int) string {
+	base := lipgloss.NewStyle()
+	if isError {
+		base = errorStyle
+	}
+	var styled string
+	idx := -1
+	if query != "" {
+		idx = strings.Index(strings.ToLower(line), strings.ToLower(query))
+	}
+	switch {
+	case idx < 0:
+		styled = base.Render(line)
+	default:
+		matchStyle := searchDimStyle
+		if active {
+			matchStyle = searchStyle
+		}
+		before, match, after := line[:idx], line[idx:idx+len(query)], line[idx+len(query):]
+		styled = base.Render(before) + matchStyle.Render(match) + base.Render(after)
+	}
+	if width > 0 {
+		return ansi.Wrap(styled, width, "")
+	}
+	return styled
 }
 
 func (m Model) jobLogHints() []hint {
 	lines := len(m.jobLog.lines)
 	height := m.logBodyHeight()
+	width := m.contentWidth()
 	start := min(m.jobLog.lineOffset, max(0, lines-1))
-	end := min(start+height, lines)
+	_, end := m.logVisibleLines(start, height, width)
+	followLabel := "follow"
+	if m.jobLogFollowing {
+		followLabel = "stop following"
+	}
 	return []hint{
 		{fmt.Sprintf("%d-%d/%d", start+1, end, lines), ""},
 		{"j/k", "scroll"},
@@ -113,12 +200,37 @@ func (m Model) jobLogHints() []hint {
 		{"e/E", "error"},
 		{"g/G", "top/end"},
 		{"o", "open job"},
-		{"y", "copy link"},
+		{"y", "copy line"},
+		{"s", "save log"},
+		{"f", followLabel},
 		{"R", "retry job"},
 		{"r", "refresh"},
 		{"esc", "back"},
 		{"q", "quit"},
 	}
+}
+
+// currentLineText is what 'y' copies: the active search match if one is
+// selected, else the line at the top of the current viewport.
+func (l logState) currentLineText() string {
+	if idx, ok := l.activeSearchLine(); ok {
+		return l.lines[idx]
+	}
+	if l.lineOffset >= 0 && l.lineOffset < len(l.lines) {
+		return l.lines[l.lineOffset]
+	}
+	return ""
+}
+
+func (l logState) activeSearchLine() (int, bool) {
+	if len(l.searchMatches) == 0 || l.searchCursor < 0 || l.searchCursor >= len(l.searchMatches) {
+		return 0, false
+	}
+	idx := l.searchMatches[l.searchCursor]
+	if idx < 0 || idx >= len(l.lines) {
+		return 0, false
+	}
+	return idx, true
 }
 
 func (l *logState) scroll(delta, height int) {

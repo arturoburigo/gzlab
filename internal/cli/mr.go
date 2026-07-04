@@ -10,8 +10,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/arturoburigo/gitlab-tui/internal/gitdetect"
-	"github.com/arturoburigo/gitlab-tui/internal/gitlab"
+	"github.com/arturoburigo/gzlab/internal/gitdetect"
+	"github.com/arturoburigo/gzlab/internal/gitlab"
 )
 
 func newMRCommand() *cobra.Command {
@@ -21,17 +21,89 @@ func newMRCommand() *cobra.Command {
 	}
 	cmd.AddCommand(newMRListCommand())
 	cmd.AddCommand(newMRViewCommand())
+	cmd.AddCommand(newMRCheckoutCommand())
 	return cmd
 }
 
-func newMRListCommand() *cobra.Command {
+func newMRCheckoutCommand() *cobra.Command {
 	return &cobra.Command{
+		Use:   "checkout <iid>",
+		Short: "Check out a merge request's source branch locally",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			iid, err := strconv.Atoi(args[0])
+			if err != nil {
+				return fmt.Errorf("invalid merge request IID %q: %w", args[0], err)
+			}
+
+			dir, err := os.Getwd()
+			if err != nil {
+				return err
+			}
+			repoRoot, err := gitdetect.RepoRoot(dir)
+			if err != nil {
+				return fmt.Errorf("gzlab must be run inside a git repository: %w", err)
+			}
+
+			ctx, cancel := withAPITimeout(cmd.Context())
+			defer cancel()
+			if _, err := glabRunner(ctx, repoRoot, "mr", "checkout", strconv.Itoa(iid)); err != nil {
+				return err
+			}
+
+			branch, err := gitdetect.CurrentBranch(repoRoot)
+			if err != nil {
+				return err
+			}
+			_, err = fmt.Fprintf(cmd.OutOrStdout(), "Checked out %s (from !%d).\n", branch, iid)
+			return err
+		},
+	}
+}
+
+func newMRListCommand() *cobra.Command {
+	var mine, assigned, review bool
+
+	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List open merge requests for the current project",
-		Args:  cobra.NoArgs,
+		Long: `List open merge requests for the current project.
+
+With --mine, --assigned, or --review, lists across all projects the token
+can see instead — GitLab's cross-project merge request views.`,
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if boolFlagCount(mine, assigned, review) > 1 {
+				return fmt.Errorf("only one of --mine, --assigned, --review may be set")
+			}
+
 			ctx, cancel := withAPITimeout(context.Background())
 			defer cancel()
+
+			if mine || assigned || review {
+				client, err := resolveClient()
+				if err != nil {
+					return err
+				}
+				opts := gitlab.ListMyMergeRequestsOptions{}
+				switch {
+				case mine:
+					opts.Scope = gitlab.MergeRequestsScopeCreatedByMe
+				case assigned:
+					opts.Scope = gitlab.MergeRequestsScopeAssignedToMe
+				case review:
+					user, err := client.CurrentUser(ctx)
+					if err != nil {
+						return err
+					}
+					opts.ReviewerUsername = user.Username
+				}
+				mrs, err := client.ListMyMergeRequests(ctx, opts)
+				if err != nil {
+					return err
+				}
+				return printMRList(cmd.OutOrStdout(), mrs)
+			}
 
 			client, project, _, err := resolveProject(ctx)
 			if err != nil {
@@ -44,6 +116,21 @@ func newMRListCommand() *cobra.Command {
 			return printMRList(cmd.OutOrStdout(), mrs)
 		},
 	}
+
+	cmd.Flags().BoolVar(&mine, "mine", false, "list merge requests created by you, across all projects")
+	cmd.Flags().BoolVar(&assigned, "assigned", false, "list merge requests assigned to you, across all projects")
+	cmd.Flags().BoolVar(&review, "review", false, "list merge requests where you're a requested reviewer, across all projects")
+	return cmd
+}
+
+func boolFlagCount(flags ...bool) int {
+	n := 0
+	for _, f := range flags {
+		if f {
+			n++
+		}
+	}
+	return n
 }
 
 func newMRViewCommand() *cobra.Command {
@@ -79,8 +166,20 @@ func newMRViewCommand() *cobra.Command {
 	}
 }
 
+// resolveClient loads the active profile (--profile flag or default_profile)
+// and builds its GitLab client, without requiring a git repository — the
+// preamble for cross-project commands like `mr list --mine`.
+func resolveClient() (gitlab.Client, error) {
+	cfg, _, profile, err := loadActiveProfile()
+	if err != nil {
+		return nil, err
+	}
+	return newClientForProfileWithCache(cfg)(profile)
+}
+
 // resolveProject detects the current repo, matches it to a profile, and looks
-// up its GitLab project — the shared preamble for the mr subcommands.
+// up its GitLab project — the shared preamble for the project-scoped mr
+// subcommands.
 func resolveProject(ctx context.Context) (gitlab.Client, *gitlab.Project, string, error) {
 	dir, err := os.Getwd()
 	if err != nil {
@@ -88,7 +187,7 @@ func resolveProject(ctx context.Context) (gitlab.Client, *gitlab.Project, string
 	}
 	repoRoot, err := gitdetect.RepoRoot(dir)
 	if err != nil {
-		return nil, nil, "", fmt.Errorf("gitlab-tui must be run inside a git repository: %w", err)
+		return nil, nil, "", fmt.Errorf("gzlab must be run inside a git repository: %w", err)
 	}
 	originURL, err := gitdetect.OriginURL(repoRoot)
 	if err != nil {
@@ -103,11 +202,7 @@ func resolveProject(ctx context.Context) (gitlab.Client, *gitlab.Project, string
 		return nil, nil, "", fmt.Errorf("could not determine the current branch: %w", err)
 	}
 
-	_, _, profile, err := loadActiveProfile()
-	if err != nil {
-		return nil, nil, "", err
-	}
-	client, err := newClientForProfile(profile)
+	client, err := resolveClient()
 	if err != nil {
 		return nil, nil, "", err
 	}

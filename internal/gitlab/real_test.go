@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // newTestClient starts an httptest server driven by handler and returns a
@@ -315,5 +316,111 @@ func TestRealClient_FindMergeRequestForBranch_NotFound(t *testing.T) {
 	_, err := client.FindMergeRequestForBranch(context.Background(), 2087, "main")
 	if !errors.Is(err, ErrNotFound) {
 		t.Errorf("FindMergeRequestForBranch() error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestRealClient_ListCommits_FiltersByAuthorAndAllBranches(t *testing.T) {
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("author"); got != "Arturo Burigo" {
+			t.Errorf("author query param = %q, want %q", got, "Arturo Burigo")
+		}
+		if got := r.URL.Query().Get("all"); got != "true" {
+			t.Errorf("all query param = %q, want %q", got, "true")
+		}
+		writeJSON(t, w, http.StatusOK, []map[string]any{
+			{"short_id": "a1b2c3d", "title": "Fix retry logic", "author_name": "Arturo Burigo"},
+		})
+	})
+
+	got, err := client.ListCommits(context.Background(), 2087, ListCommitsOptions{Author: "Arturo Burigo", Limit: 5})
+	if err != nil {
+		t.Fatalf("ListCommits() error = %v", err)
+	}
+	if len(got) != 1 || got[0].ShortID != "a1b2c3d" {
+		t.Errorf("ListCommits() = %+v", got)
+	}
+}
+
+func TestRealClient_ListMyMergeRequests_AllStateOmitsFilter(t *testing.T) {
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := r.URL.Query()["state"]; ok {
+			t.Errorf("state query param should be omitted for MergeRequestStateAll, got %q", r.URL.Query().Get("state"))
+		}
+		writeJSON(t, w, http.StatusOK, []map[string]any{
+			{"iid": 1, "title": "opened one", "state": "opened"},
+			{"iid": 2, "title": "merged one", "state": "merged"},
+		})
+	})
+
+	got, err := client.ListMyMergeRequests(context.Background(), ListMyMergeRequestsOptions{State: MergeRequestStateAll, Scope: MergeRequestsScopeCreatedByMe})
+	if err != nil {
+		t.Fatalf("ListMyMergeRequests() error = %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("ListMyMergeRequests() returned %d MRs, want 2", len(got))
+	}
+}
+
+func TestRealClient_ListMyMergeRequests_LimitStopsAtOnePage(t *testing.T) {
+	requests := 0
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("X-Next-Page", "2") // pretend there's more; Limit should stop us from asking
+		writeJSON(t, w, http.StatusOK, []map[string]any{
+			{"iid": 1, "title": "one"}, {"iid": 2, "title": "two"}, {"iid": 3, "title": "three"},
+		})
+	})
+
+	got, err := client.ListMyMergeRequests(context.Background(), ListMyMergeRequestsOptions{State: MergeRequestStateAll, Limit: 2})
+	if err != nil {
+		t.Fatalf("ListMyMergeRequests() error = %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("ListMyMergeRequests() returned %d MRs, want capped to Limit=2", len(got))
+	}
+	if requests != 1 {
+		t.Errorf("made %d requests, want 1 (Limit should stop pagination)", requests)
+	}
+}
+
+func TestRealClient_ListMyContributionEvents_SendsAfterFilter(t *testing.T) {
+	after := time.Date(2026, 6, 26, 0, 0, 0, 0, time.UTC)
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("after"); got != "2026-06-26" {
+			t.Errorf("after query param = %q, want %q", got, "2026-06-26")
+		}
+		writeJSON(t, w, http.StatusOK, []map[string]any{
+			{"action_name": "opened", "target_title": "Adjust invoice validation"},
+		})
+	})
+
+	got, err := client.ListMyContributionEvents(context.Background(), ListContributionEventsOptions{After: after})
+	if err != nil {
+		t.Fatalf("ListMyContributionEvents() error = %v", err)
+	}
+	if len(got) != 1 || got[0].Action != "opened" || got[0].Target != "Adjust invoice validation" {
+		t.Errorf("ListMyContributionEvents() = %+v", got)
+	}
+}
+
+func TestRealClient_ListMyContributionEvents_LimitStopsAtOnePage(t *testing.T) {
+	requests := 0
+	client := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("X-Next-Page", "2") // pretend there's more; Limit should stop us from asking
+		writeJSON(t, w, http.StatusOK, []map[string]any{
+			{"action_name": "opened"}, {"action_name": "commented on"}, {"action_name": "closed"},
+		})
+	})
+
+	got, err := client.ListMyContributionEvents(context.Background(), ListContributionEventsOptions{Limit: 2})
+	if err != nil {
+		t.Fatalf("ListMyContributionEvents() error = %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("ListMyContributionEvents() returned %d events, want capped to Limit=2", len(got))
+	}
+	if requests != 1 {
+		t.Errorf("made %d requests, want 1 (Limit should stop pagination)", requests)
 	}
 }

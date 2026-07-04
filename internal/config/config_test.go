@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+	"time"
 )
 
 func TestSaveLoadRoundTrip(t *testing.T) {
@@ -39,6 +40,55 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	}
 }
 
+func TestCacheTTL_RoundTripsThroughYAML(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+
+	cfg := Default()
+	cfg.Profiles["empresa"] = Profile{Host: "https://gitlab.example.com", TokenEnv: "X"}
+	cfg.Cache.TTL.Pipeline = Duration(30 * time.Second)
+	cfg.Cache.TTL.Diff = Duration(10 * time.Minute)
+
+	if err := Save(path, cfg); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if got := time.Duration(loaded.Cache.TTL.Pipeline); got != 30*time.Second {
+		t.Errorf("Cache.TTL.Pipeline = %v, want 30s", got)
+	}
+	if got := time.Duration(loaded.Cache.TTL.Diff); got != 10*time.Minute {
+		t.Errorf("Cache.TTL.Diff = %v, want 10m", got)
+	}
+}
+
+func TestCacheTTL_UnsetFieldsKeepDefaultAfterPartialOverride(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+
+	// A hand-edited config.yaml that only overrides one TTL — the rest
+	// should still come from Default(), not zero out (which would disable
+	// caching for that type).
+	raw := "profiles:\n  empresa:\n    host: https://gitlab.example.com\n    token_env: X\ncache:\n  ttl:\n    pipeline: 5s\n"
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatalf("writing config: %v", err)
+	}
+
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if got := time.Duration(loaded.Cache.TTL.Pipeline); got != 5*time.Second {
+		t.Errorf("Cache.TTL.Pipeline = %v, want the overridden 5s", got)
+	}
+	if got := time.Duration(loaded.Cache.TTL.CurrentUser); got != 24*time.Hour {
+		t.Errorf("Cache.TTL.CurrentUser = %v, want the untouched default 24h", got)
+	}
+}
+
 func TestSave_TightensPreExistingLoosePermissions(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX file permissions don't apply on windows")
@@ -48,7 +98,7 @@ func TestSave_TightensPreExistingLoosePermissions(t *testing.T) {
 	path := filepath.Join(dir, "config.yaml")
 
 	// Simulate a config file/dir that already existed with looser
-	// permissions (e.g. restored from a dotfiles sync) before gitlab-tui
+	// permissions (e.g. restored from a dotfiles sync) before gzlab
 	// ever wrote to it.
 	if err := os.WriteFile(path, []byte("default_profile: \"\"\nprofiles: {}\n"), 0o644); err != nil {
 		t.Fatalf("seeding pre-existing file: %v", err)

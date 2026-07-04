@@ -8,6 +8,12 @@ See [`gzlab-plano-completo.md`](./gzlab-plano-completo.md) for the
 full product plan and [`BACKLOG.md`](./BACKLOG.md) for the épico-by-épico
 backlog and progress.
 
+## Demo
+
+<video src="https://github.com/arturoburigo/gzlab/raw/main/docs/presentation.mov" controls width="100%"></video>
+
+▶️ If the player above doesn't load, [watch the demo](./docs/presentation.mov).
+
 ## Status
 
 Early development. The current focus is **Fase 1 — Base utilizável**: token

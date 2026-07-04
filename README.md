@@ -6,9 +6,7 @@ requests, diffs, pipelines and job logs — across multiple GitLab profiles
 
 ## Demo
 
-<video src="https://github.com/arturoburigo/gzlab/raw/main/docs/presentation.mov" controls width="100%"></video>
-
-▶️ If the player above doesn't load, [watch the demo](./docs/presentation.mov).
+https://github.com/user-attachments/assets/7e70d23a-82bc-4a1a-9549-fd2a04a10b69
 
 ## Status
 
